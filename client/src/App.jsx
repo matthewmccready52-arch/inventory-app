@@ -4,8 +4,7 @@ import QRCode from 'qrcode'
 import './App.css'
 
 const host = window.location.hostname || 'localhost'
-const API = `http://${host}:3001/api`
-const ASSET_BASE = `http://${host}:3001`
+const defaultApiBase = `http://${host}:3001`
 
 const emptyPartForm = {
   name: '',
@@ -72,6 +71,7 @@ export default function App() {
   const [selectedLabelIds, setSelectedLabelIds] = useState([])
   const [health, setHealth] = useState(null)
   const [transactionDrafts, setTransactionDrafts] = useState({})
+  const [apiBase, setApiBase] = useState(() => localStorage.getItem('inventory:apiBase') || defaultApiBase)
   const videoRef = useRef(null)
   const streamRef = useRef(null)
   const scannerControlsRef = useRef(null)
@@ -82,6 +82,8 @@ export default function App() {
 
   const [newCategoryName, setNewCategoryName] = useState('')
   const [newCategoryParentId, setNewCategoryParentId] = useState('')
+  const API = `${apiBase.replace(/\/$/, '')}/api`
+  const ASSET_BASE = apiBase.replace(/\/$/, '')
 
   async function loadAll() {
     const [p, l, c, t] = await Promise.all([
@@ -107,7 +109,7 @@ export default function App() {
       .catch(() => {})
 
     return () => stopCamera()
-  }, [])
+  }, [apiBase])
 
   useEffect(() => {
     function handleInstallPrompt(event) {
@@ -703,6 +705,13 @@ export default function App() {
     setInstallPrompt(null)
   }
 
+  function saveApiBase() {
+    const cleaned = apiBase.replace(/\/$/, '')
+    localStorage.setItem('inventory:apiBase', cleaned)
+    setApiBase(cleaned)
+    setStatus(`Server URL saved: ${cleaned}`)
+  }
+
   function backupAgeText() {
     if (!lastBackupAt) return 'No backup recorded on this device.'
 
@@ -799,6 +808,17 @@ export default function App() {
               Phone: http://{health.lanAddresses[0]}:5173
             </>
           )}
+        </div>
+        <div className="server-setting">
+          <label>
+            Server URL for Android
+            <input
+              value={apiBase}
+              onChange={(e) => setApiBase(e.target.value)}
+              placeholder="http://192.168.1.158:3001"
+            />
+          </label>
+          <button onClick={saveApiBase}>Save Server URL</button>
         </div>
       </section>
 

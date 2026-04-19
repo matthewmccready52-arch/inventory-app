@@ -157,6 +157,13 @@ textarea {
   margin-top: 6px;
 }
 
+.server-setting {
+  align-items: end;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(260px, 1fr) auto;
+}
+
 .ops-actions {
   display: flex;
   flex-wrap: wrap;
@@ -537,6 +544,7 @@ textarea {
   .field-grid,
   .part-meta,
   .scan-form,
+  .server-setting,
   .stock-controls {
     grid-template-columns: 1fr;
   }
