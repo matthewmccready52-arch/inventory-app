@@ -1,5 +1,6 @@
 require('dotenv').config();
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const express = require('express');
 const cors = require('cors');
@@ -78,6 +79,20 @@ function ensureSchema() {
       });
     }
   });
+
+  db.all('PRAGMA table_info(transactions)', [], (err, columns) => {
+    if (err) {
+      console.error('Failed to inspect transactions schema', err);
+      return;
+    }
+
+    const names = columns.map((column) => column.name);
+    if (!names.includes('note')) {
+      db.run('ALTER TABLE transactions ADD COLUMN note TEXT', [], (alterErr) => {
+        if (alterErr) console.error('Failed to add transaction note column', alterErr);
+      });
+    }
+  });
 }
 
 ensureSchema();
@@ -89,6 +104,13 @@ function csvEscape(value) {
 
 function timestampName(prefix, ext) {
   return `${prefix}-${new Date().toISOString().replace(/[:.]/g, '-')}.${ext}`;
+}
+
+function getLanAddresses() {
+  return Object.values(os.networkInterfaces())
+    .flat()
+    .filter((item) => item && item.family === 'IPv4' && !item.internal)
+    .map((item) => item.address);
 }
 
 function createDatabaseBackup(prefix, callback) {
@@ -150,7 +172,8 @@ app.get('/api/health', (req, res) => {
     ok: true,
     message: 'Inventory server is running',
     host: HOST,
-    port: PORT
+    port: PORT,
+    lanAddresses: getLanAddresses()
   });
 });
 
@@ -184,6 +207,29 @@ app.get('/api/parts/export', (req, res) => {
   });
 });
 
+app.get('/api/parts/export/low-stock', (req, res) => {
+  db.all(
+    'SELECT * FROM parts WHERE reorderThreshold > 0 AND quantity <= reorderThreshold ORDER BY name ASC',
+    [],
+    (err, rows) => {
+      if (err) {
+        console.error(err);
+        return res.status(500).json({ error: 'Failed to export low stock parts' });
+      }
+
+      const header = ['id', ...partFields];
+      const csv = [
+        header.join(','),
+        ...rows.map((row) => header.map((field) => csvEscape(row[field])).join(','))
+      ].join('\n');
+
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', 'attachment; filename="low-stock-parts.csv"');
+      res.send(csv);
+    }
+  );
+});
+
 app.post('/api/parts', (req, res) => {
   const part = normalizePart(req.body);
 
@@ -211,6 +257,7 @@ app.post('/api/parts', (req, res) => {
 app.post('/api/parts/:id/checkout', (req, res) => {
   const id = req.params.id;
   const qty = Number(req.body.qty || 1);
+  const note = String(req.body.note || '').trim();
 
   if (!Number.isFinite(qty) || qty <= 0) {
     return res.status(400).json({ error: 'Quantity must be greater than zero' });
@@ -231,8 +278,8 @@ app.post('/api/parts/:id/checkout', (req, res) => {
       }
 
       db.run(
-        'INSERT INTO transactions (partId, type, qtyChange) VALUES (?, ?, ?)',
-        [id, 'checkout', -actualQty]
+        'INSERT INTO transactions (partId, type, qtyChange, note) VALUES (?, ?, ?, ?)',
+        [id, 'checkout', -actualQty, note]
       );
 
       res.json({ success: true, quantity: newQty });
@@ -243,6 +290,7 @@ app.post('/api/parts/:id/checkout', (req, res) => {
 app.post('/api/parts/:id/return', (req, res) => {
   const id = req.params.id;
   const qty = Number(req.body.qty || 1);
+  const note = String(req.body.note || '').trim();
 
   if (!Number.isFinite(qty) || qty <= 0) {
     return res.status(400).json({ error: 'Quantity must be greater than zero' });
@@ -262,8 +310,8 @@ app.post('/api/parts/:id/return', (req, res) => {
       }
 
       db.run(
-        'INSERT INTO transactions (partId, type, qtyChange) VALUES (?, ?, ?)',
-        [id, 'return', qty]
+        'INSERT INTO transactions (partId, type, qtyChange, note) VALUES (?, ?, ?, ?)',
+        [id, 'return', qty, note]
       );
 
       res.json({ success: true, quantity: newQty });
@@ -318,6 +366,37 @@ app.post('/api/locations', (req, res) => {
       res.json({ id: this.lastID });
     }
   );
+});
+
+app.patch('/api/transactions/:id', (req, res) => {
+  const id = req.params.id;
+  const note = String(req.body.note || '').trim();
+
+  db.run('UPDATE transactions SET note = ? WHERE id = ?', [note, id], function (err) {
+    if (err) {
+      console.error(err);
+      return res.status(500).json({ error: 'Failed to update transaction' });
+    }
+
+    if (this.changes === 0) {
+      return res.status(404).json({ error: 'Transaction not found' });
+    }
+
+    res.json({ success: true });
+  });
+});
+
+app.delete('/api/transactions/:id', (req, res) => {
+  const id = req.params.id;
+
+  db.run('DELETE FROM transactions WHERE id = ?', [id], function (err) {
+    if (err) {
+      console.error(err);
+      return res.status(500).json({ error: 'Failed to delete transaction' });
+    }
+
+    res.json({ success: true, deleted: this.changes });
+  });
 });
 
 app.put('/api/locations/:id', (req, res) => {

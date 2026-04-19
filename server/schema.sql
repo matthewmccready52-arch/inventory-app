@@ -38,5 +38,6 @@ CREATE TABLE IF NOT EXISTS transactions (
   partId INTEGER,
   type TEXT,
   qtyChange INTEGER,
+  note TEXT,
   timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
 );

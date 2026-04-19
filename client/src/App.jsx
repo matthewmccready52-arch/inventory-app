@@ -58,6 +58,7 @@ export default function App() {
   const [partForm, setPartForm] = useState(emptyPartForm)
   const [editingId, setEditingId] = useState(null)
   const [stockQtyById, setStockQtyById] = useState({})
+  const [stockNoteById, setStockNoteById] = useState({})
   const [csvText, setCsvText] = useState('')
   const [cameraOn, setCameraOn] = useState(false)
   const [editingCategoryId, setEditingCategoryId] = useState(null)
@@ -67,6 +68,9 @@ export default function App() {
   const [installPrompt, setInstallPrompt] = useState(null)
   const [qrByPartId, setQrByPartId] = useState({})
   const [lastBackupAt, setLastBackupAt] = useState(() => localStorage.getItem('inventory:lastBackupAt') || '')
+  const [selectedLabelIds, setSelectedLabelIds] = useState([])
+  const [health, setHealth] = useState(null)
+  const [transactionDrafts, setTransactionDrafts] = useState({})
   const videoRef = useRef(null)
   const streamRef = useRef(null)
   const scanTimerRef = useRef(null)
@@ -96,6 +100,10 @@ export default function App() {
     loadAll().catch(() => {
       setStatus('Could not reach the server. Make sure the backend is running.')
     })
+    fetch(`${API}/health`)
+      .then((res) => res.json())
+      .then(setHealth)
+      .catch(() => {})
 
     return () => stopCamera()
   }, [])
@@ -279,7 +287,7 @@ export default function App() {
     const res = await fetch(`${API}/parts/${id}/${action}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ qty })
+      body: JSON.stringify({ qty, note: stockNoteById[id] || '' })
     })
 
     if (!res.ok) {
@@ -289,6 +297,7 @@ export default function App() {
     }
 
     setStatus(action === 'checkout' ? `Checked out ${qty}.` : `Returned ${qty}.`)
+    setStockNoteById((current) => ({ ...current, [id]: '' }))
     loadAll()
   }
 
@@ -320,6 +329,34 @@ export default function App() {
   }
 
   const lowStockParts = useMemo(() => parts.filter(isLowStock), [parts])
+
+  const duplicateCodes = useMemo(() => {
+    const seen = {}
+    for (const part of parts) {
+      for (const field of ['barcode', 'internalCode', 'partNumber']) {
+        const value = String(part[field] || '').trim().toLowerCase()
+        if (!value) continue
+        const key = `${field}:${value}`
+        seen[key] = seen[key] || []
+        seen[key].push(part)
+      }
+    }
+    return Object.fromEntries(Object.entries(seen).filter(([, matches]) => matches.length > 1))
+  }, [parts])
+
+  const duplicateWarnings = useMemo(() => {
+    const warnings = []
+    for (const field of ['barcode', 'internalCode', 'partNumber']) {
+      const value = String(partForm[field] || '').trim().toLowerCase()
+      if (!value) continue
+      const matches = parts.filter((part) => {
+        if (editingId && part.id === editingId) return false
+        return String(part[field] || '').trim().toLowerCase() === value
+      })
+      if (matches.length > 0) warnings.push(`${field} already used by ${matches.map((part) => part.name).join(', ')}`)
+    }
+    return warnings
+  }, [partForm, parts, editingId])
 
   const filteredParts = useMemo(() => parts.filter((p) => {
     const q = search.trim().toLowerCase()
@@ -524,6 +561,10 @@ export default function App() {
     window.location.href = `${API}/parts/export`
   }
 
+  function downloadLowStockCsv() {
+    window.location.href = `${API}/parts/export/low-stock`
+  }
+
   function downloadBackup() {
     const now = new Date().toISOString()
     localStorage.setItem('inventory:lastBackupAt', now)
@@ -615,6 +656,45 @@ export default function App() {
     window.print()
   }
 
+  function toggleLabelSelection(id) {
+    setSelectedLabelIds((current) =>
+      current.includes(id) ? current.filter((value) => value !== id) : [...current, id]
+    )
+  }
+
+  const printableParts = selectedLabelIds.length > 0
+    ? filteredParts.filter((part) => selectedLabelIds.includes(part.id))
+    : filteredParts
+
+  async function saveTransactionNote(transaction) {
+    const note = transactionDrafts[transaction.id] ?? transaction.note ?? ''
+    const res = await fetch(`${API}/transactions/${transaction.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note })
+    })
+    const data = await res.json()
+    if (!res.ok) {
+      setStatus(data.error || 'Failed to update transaction.')
+      return
+    }
+    setStatus('Transaction note updated.')
+    loadAll()
+  }
+
+  async function deleteTransaction(transaction) {
+    const ok = window.confirm(`Delete this ${transaction.type} transaction? Stock quantity will not be changed.`)
+    if (!ok) return
+    const res = await fetch(`${API}/transactions/${transaction.id}`, { method: 'DELETE' })
+    const data = await res.json()
+    if (!res.ok) {
+      setStatus(data.error || 'Failed to delete transaction.')
+      return
+    }
+    setStatus('Transaction deleted.')
+    loadAll()
+  }
+
   async function installApp() {
     if (!installPrompt) {
       setStatus('Use Chrome menu > Add to Home screen if the install prompt is not available yet.')
@@ -703,6 +783,7 @@ export default function App() {
         </div>
         <div className="ops-actions">
           <button onClick={downloadPartsCsv}>Export CSV</button>
+          <button onClick={downloadLowStockCsv}>Export Low Stock</button>
           <button onClick={downloadBackup}>Download Backup</button>
           <label className="restore-picker">
             Restore DB
@@ -715,6 +796,12 @@ export default function App() {
           Frontend: http://{host}:5173
           <br />
           Backend: http://{host}:3001
+          {health?.lanAddresses?.length > 0 && (
+            <>
+              <br />
+              Phone: http://{health.lanAddresses[0]}:5173
+            </>
+          )}
         </div>
       </section>
 
@@ -845,6 +932,13 @@ export default function App() {
               <textarea value={partForm.notes} onChange={(e) => updatePartForm('notes', e.target.value)} />
             </label>
           </div>
+          {duplicateWarnings.length > 0 && (
+            <div className="duplicate-warning">
+              {duplicateWarnings.map((warning) => (
+                <div key={warning}>{warning}</div>
+              ))}
+            </div>
+          )}
           {partForm.imageUrl && <img className="form-photo-preview" src={assetUrl(partForm.imageUrl)} alt="" />}
           <button className="primary-action" onClick={savePart}>
             {editingId ? 'Save Changes' : 'Add Part'}
@@ -925,6 +1019,14 @@ export default function App() {
           <div className="parts-grid">
             {filteredParts.map((p) => (
               <article key={p.id} className={isLowStock(p) ? 'part-card low' : 'part-card'}>
+                <label className="label-select">
+                  <input
+                    type="checkbox"
+                    checked={selectedLabelIds.includes(p.id)}
+                    onChange={() => toggleLabelSelection(p.id)}
+                  />
+                  Print label
+                </label>
                 {p.imageUrl && <img className="part-photo" src={assetUrl(p.imageUrl)} alt="" />}
                 <div className="part-card-header">
                   <div>
@@ -933,6 +1035,9 @@ export default function App() {
                   </div>
                   {isLowStock(p) && <em>Low</em>}
                 </div>
+                {Object.values(duplicateCodes).some((matches) => matches.some((match) => match.id === p.id)) && (
+                  <div className="duplicate-chip">Duplicate code warning</div>
+                )}
                 <div className="part-meta">
                   <span>Qty: {p.quantity}</span>
                   <span>Reorder: {p.reorderThreshold || 0}</span>
@@ -952,6 +1057,13 @@ export default function App() {
                     value={stockQtyById[p.id] || 1}
                     onChange={(e) => setStockQtyById((current) => ({ ...current, [p.id]: e.target.value }))}
                     aria-label={`Quantity for ${p.name}`}
+                  />
+                  <input
+                    className="stock-note"
+                    placeholder="Reason or job"
+                    value={stockNoteById[p.id] || ''}
+                    onChange={(e) => setStockNoteById((current) => ({ ...current, [p.id]: e.target.value }))}
+                    aria-label={`Reason for ${p.name}`}
                   />
                   <button onClick={() => changeStock(p.id, 'checkout')}>Checkout</button>
                   <button onClick={() => changeStock(p.id, 'return')}>Return</button>
@@ -973,20 +1085,23 @@ export default function App() {
           <div>
             <h2>Printable Labels</h2>
             <p>
-              {filteredParts.length === 0
+              {printableParts.length === 0
                 ? 'No labels ready. Add parts or clear your search.'
-                : `${filteredParts.length} label${filteredParts.length === 1 ? '' : 's'} ready for the current parts list.`}
+                : `${printableParts.length} label${printableParts.length === 1 ? '' : 's'} ready${selectedLabelIds.length > 0 ? ' from your selection' : ' for the current parts list'}.`}
             </p>
           </div>
-          <button onClick={printLabels} disabled={filteredParts.length === 0}>
+          <div className="label-actions">
+            {selectedLabelIds.length > 0 && <button onClick={() => setSelectedLabelIds([])}>Clear Selection</button>}
+            <button onClick={printLabels} disabled={printableParts.length === 0}>
             Print Labels
-          </button>
+            </button>
+          </div>
         </div>
-        {filteredParts.length === 0 ? (
+        {printableParts.length === 0 ? (
           <div className="empty-state">No matching parts to print.</div>
         ) : (
           <div className="labels-grid">
-            {filteredParts.map((part) => {
+            {printableParts.map((part) => {
               const code = getLabelCode(part)
               return (
                 <article className="print-label" key={part.id}>
@@ -1114,6 +1229,14 @@ export default function App() {
             <div key={t.id}>
               <span>{t.partName || 'Unknown part'}</span>
               <strong>{t.qtyChange > 0 ? `+${t.qtyChange}` : t.qtyChange}</strong>
+              <input
+                value={transactionDrafts[t.id] ?? t.note ?? ''}
+                onChange={(e) => setTransactionDrafts((current) => ({ ...current, [t.id]: e.target.value }))}
+                placeholder="Note"
+                aria-label={`Note for transaction ${t.id}`}
+              />
+              <button onClick={() => saveTransactionNote(t)}>Save Note</button>
+              <button className="danger-button" onClick={() => deleteTransaction(t)}>Delete</button>
               <time>{t.timestamp}</time>
             </div>
           ))

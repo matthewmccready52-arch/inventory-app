@@ -237,6 +237,29 @@ textarea {
   border-color: var(--danger);
 }
 
+.duplicate-warning,
+.duplicate-chip {
+  background: var(--danger-soft);
+  border: 1px solid rgba(255, 107, 95, 0.55);
+  border-radius: 8px;
+  color: var(--danger);
+}
+
+.duplicate-warning {
+  display: grid;
+  gap: 6px;
+  font-weight: 800;
+  padding: 10px 12px;
+}
+
+.duplicate-chip {
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 800;
+  margin-top: 10px;
+  padding: 5px 8px;
+}
+
 .scanner-video {
   display: none;
 }
@@ -292,6 +315,18 @@ textarea {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 14px;
+}
+
+.label-select {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.label-select input {
+  min-height: 0;
+  width: auto;
 }
 
 .part-photo {
@@ -360,12 +395,16 @@ textarea {
 .stock-controls {
   align-items: center;
   display: grid;
-  grid-template-columns: 86px auto auto;
+  grid-template-columns: 86px minmax(120px, 1fr) auto auto;
   gap: 8px;
   margin-top: 12px;
 }
 
 .stock-controls input {
+  min-width: 0;
+}
+
+.stock-note {
   min-width: 0;
 }
 
@@ -396,6 +435,13 @@ textarea {
   display: flex;
   justify-content: space-between;
   gap: 16px;
+}
+
+.label-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
 }
 
 .labels-header p {
@@ -447,6 +493,15 @@ textarea {
   margin-left: auto;
 }
 
+.transactions > div {
+  flex-wrap: wrap;
+}
+
+.transactions input {
+  flex: 1 1 180px;
+  max-width: 320px;
+}
+
 .empty-state {
   color: var(--muted);
   padding: 10px 0;
@@ -492,6 +547,15 @@ textarea {
 
   .inline-edit {
     grid-template-columns: 1fr;
+  }
+
+  .labels-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .label-actions {
+    justify-content: flex-start;
   }
 }
 
