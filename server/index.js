@@ -11,6 +11,7 @@ const HOST = process.env.HOST || '0.0.0.0';
 const dbPath = path.resolve(__dirname, '../database/inventory.db');
 const backupDir = path.resolve(__dirname, '../database/backups');
 const uploadDir = path.resolve(__dirname, '../uploads/images');
+const maxAutoBackups = Number(process.env.MAX_AUTO_BACKUPS || 14);
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
@@ -89,6 +90,59 @@ function csvEscape(value) {
 function timestampName(prefix, ext) {
   return `${prefix}-${new Date().toISOString().replace(/[:.]/g, '-')}.${ext}`;
 }
+
+function createDatabaseBackup(prefix, callback) {
+  const backupPath = path.join(backupDir, timestampName(prefix, 'db'));
+
+  fs.copyFile(dbPath, backupPath, (err) => {
+    if (err) {
+      if (callback) callback(err);
+      return;
+    }
+
+    if (callback) callback(null, backupPath);
+  });
+}
+
+function pruneAutoBackups() {
+  fs.readdir(backupDir, (err, files) => {
+    if (err) {
+      console.error('Failed to read backup directory', err);
+      return;
+    }
+
+    const autoBackups = files
+      .filter((file) => file.startsWith('auto-startup-') && file.endsWith('.db'))
+      .map((file) => ({
+        file,
+        path: path.join(backupDir, file),
+        created: fs.statSync(path.join(backupDir, file)).mtimeMs
+      }))
+      .sort((a, b) => b.created - a.created);
+
+    for (const backup of autoBackups.slice(maxAutoBackups)) {
+      fs.unlink(backup.path, (unlinkErr) => {
+        if (unlinkErr) console.error('Failed to prune old backup', unlinkErr);
+      });
+    }
+  });
+}
+
+function createStartupBackup() {
+  if (!fs.existsSync(dbPath)) return;
+
+  createDatabaseBackup('auto-startup', (err, backupPath) => {
+    if (err) {
+      console.error('Failed to create startup backup', err);
+      return;
+    }
+
+    console.log(`Startup backup created: ${path.basename(backupPath)}`);
+    pruneAutoBackups();
+  });
+}
+
+createStartupBackup();
 
 // HEALTH
 app.get('/api/health', (req, res) => {
@@ -551,9 +605,7 @@ app.delete('/api/categories/:id', (req, res) => {
 })
 
 app.get('/api/backup', (req, res) => {
-  const backupPath = path.join(backupDir, timestampName('inventory-backup', 'db'));
-
-  fs.copyFile(dbPath, backupPath, (err) => {
+  createDatabaseBackup('manual-backup', (err, backupPath) => {
     if (err) {
       console.error(err);
       return res.status(500).json({ error: 'Failed to create backup' });
