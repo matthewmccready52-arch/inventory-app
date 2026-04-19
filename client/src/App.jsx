@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { BrowserMultiFormatReader } from '@zxing/browser'
 import QRCode from 'qrcode'
 import './App.css'
 
@@ -73,7 +74,7 @@ export default function App() {
   const [transactionDrafts, setTransactionDrafts] = useState({})
   const videoRef = useRef(null)
   const streamRef = useRef(null)
-  const scanTimerRef = useRef(null)
+  const scannerControlsRef = useRef(null)
 
   const [newLocationName, setNewLocationName] = useState('')
   const [newLocationType, setNewLocationType] = useState('bin')
@@ -433,39 +434,35 @@ export default function App() {
   }
 
   async function startCamera() {
-    if (!('BarcodeDetector' in window)) {
-      setStatus('Camera barcode scanning is not supported in this browser. A USB scanner still works.')
-      return
-    }
-
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
-      streamRef.current = stream
-      videoRef.current.srcObject = stream
-      await videoRef.current.play()
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setStatus('Camera access is not available in this browser. A USB scanner still works.')
+        return
+      }
+
       setCameraOn(true)
+      setStatus('Starting camera scanner...')
 
-      const detector = new window.BarcodeDetector({
-        formats: ['qr_code', 'code_128', 'code_39', 'ean_13', 'ean_8', 'upc_a', 'upc_e']
-      })
-
-      scanTimerRef.current = window.setInterval(async () => {
-        if (!videoRef.current) return
-        const codes = await detector.detect(videoRef.current).catch(() => [])
-        if (codes.length > 0) {
-          applyLookup(codes[0].rawValue)
+      const reader = new BrowserMultiFormatReader()
+      scannerControlsRef.current = await reader.decodeFromConstraints(
+        { video: { facingMode: 'environment' } },
+        videoRef.current,
+        (result) => {
+          if (!result) return
+          applyLookup(result.getText())
           stopCamera()
         }
-      }, 700)
+      )
     } catch {
       setStatus('Could not start camera. Check browser camera permission.')
+      setCameraOn(false)
     }
   }
 
   function stopCamera() {
-    if (scanTimerRef.current) {
-      window.clearInterval(scanTimerRef.current)
-      scanTimerRef.current = null
+    if (scannerControlsRef.current) {
+      scannerControlsRef.current.stop()
+      scannerControlsRef.current = null
     }
 
     if (streamRef.current) {
