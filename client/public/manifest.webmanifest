@@ -1,0 +1,26 @@
+{
+  "name": "Inventory System",
+  "short_name": "Inventory",
+  "description": "Track parts, locations, stock, labels, backups, and barcode lookups.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f7f8fa",
+  "theme_color": "#137c6d",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/pwa-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Open Inventory",
+      "short_name": "Inventory",
+      "url": "/"
+    }
+  ]
+}
