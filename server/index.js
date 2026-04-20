@@ -301,6 +301,37 @@ function csvEscape(value) {
   return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
+function htmlEscape(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function money(value) {
+  return `$${(Number(value) || 0).toFixed(2)}`;
+}
+
+function dbGet(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => {
+      if (err) reject(err);
+      else resolve(row);
+    });
+  });
+}
+
+function dbAll(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.all(sql, params, (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows);
+    });
+  });
+}
+
 function timestampName(prefix, ext) {
   return `${prefix}-${new Date().toISOString().replace(/[:.]/g, '-')}.${ext}`;
 }
@@ -635,6 +666,162 @@ app.get('/api/workorders/:id/parts', (req, res) => {
       res.json(rows);
     }
   );
+});
+
+app.get('/api/workorders/:id/export', async (req, res) => {
+  try {
+    const workorder = await dbGet(
+      `SELECT w.*, c.name AS customerName, c.phone AS customerPhone, c.email AS customerEmail, c.notes AS customerNotes,
+        e.name AS equipmentName, e.year, e.make, e.model, e.vin, e.serial, e.unitNumber,
+        e.mileage, e.hours, e.serialPhotoUrl, e.fleetPhotoUrl, e.notes AS equipmentNotes
+       FROM workorders w
+       LEFT JOIN customers c ON c.id = w.customerId
+       LEFT JOIN equipment e ON e.id = w.equipmentId
+       WHERE w.id = ?`,
+      [req.params.id]
+    );
+
+    if (!workorder) return res.status(404).send('Workorder not found');
+
+    const parts = await dbAll(
+      `SELECT wp.*, p.name AS partName, p.partNumber, p.internalCode, p.barcode, p.unit
+       FROM workorder_parts wp
+       LEFT JOIN parts p ON p.id = wp.partId
+       WHERE wp.workorderId = ?
+       ORDER BY wp.id ASC`,
+      [req.params.id]
+    );
+
+    const partsRetail = parts.reduce((total, part) => total + Number(part.qtyUsed || 0) * Number(part.retailPrice || 0), 0);
+    const partsCost = parts.reduce((total, part) => total + Number(part.qtyUsed || 0) * Number(part.unitCost || 0), 0);
+    const laborTotal = Number(workorder.laborHours || 0) * Number(workorder.laborRate || 0);
+    const grandTotal = partsRetail + laborTotal;
+    const origin = `${req.protocol}://${req.get('host')}`;
+    const imageUrl = (src) => {
+      if (!src) return '';
+      return String(src).startsWith('/uploads/') ? `${origin}${src}` : src;
+    };
+    const fileSafeNumber = String(workorder.number || `WO-${workorder.id}`).replace(/[^a-zA-Z0-9._-]/g, '-');
+
+    const partsRows = parts.length
+      ? parts.map((part) => `
+          <tr>
+            <td>${htmlEscape(part.qtyUsed || part.qtyReserved || 0)}</td>
+            <td>${htmlEscape(part.partNumber || part.internalCode || part.barcode || '')}</td>
+            <td>${htmlEscape(part.partName || 'Unknown part')}${part.note ? `<br><small>${htmlEscape(part.note)}</small>` : ''}</td>
+            <td class="num">${money(part.retailPrice)}</td>
+            <td class="num">${money(Number(part.qtyUsed || 0) * Number(part.retailPrice || 0))}</td>
+          </tr>
+        `).join('')
+      : '<tr><td colspan="5">No parts recorded.</td></tr>';
+
+    const photos = [workorder.serialPhotoUrl, workorder.fleetPhotoUrl].filter(Boolean).map((src, index) => `
+      <figure>
+        <img src="${htmlEscape(imageUrl(src))}" alt="">
+        <figcaption>${index === 0 ? 'Serial number photo' : 'Fleet/unit number photo'}</figcaption>
+      </figure>
+    `).join('');
+
+    const html = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>${htmlEscape(workorder.number)} Workorder</title>
+  <style>
+    body { color: #111; font-family: Arial, sans-serif; line-height: 1.35; margin: 28px; }
+    header { align-items: start; border-bottom: 3px solid #111; display: flex; justify-content: space-between; padding-bottom: 12px; }
+    h1, h2, h3, p { margin: 0; }
+    h1 { font-size: 28px; }
+    h2 { border-bottom: 1px solid #bbb; font-size: 17px; margin: 24px 0 8px; padding-bottom: 4px; }
+    .muted { color: #555; }
+    .grid { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .box { border: 1px solid #bbb; border-radius: 6px; padding: 10px; }
+    table { border-collapse: collapse; margin-top: 8px; width: 100%; }
+    th, td { border: 1px solid #aaa; padding: 7px; text-align: left; vertical-align: top; }
+    th { background: #eee; }
+    .num { text-align: right; }
+    .totals { margin-left: auto; max-width: 360px; }
+    .totals div { display: flex; justify-content: space-between; padding: 6px 0; }
+    .grand { border-top: 2px solid #111; font-size: 20px; font-weight: 700; }
+    .photos { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    figure { margin: 0; }
+    img { border: 1px solid #aaa; max-height: 260px; max-width: 100%; object-fit: contain; }
+    figcaption { color: #555; font-size: 12px; margin-top: 4px; }
+    .signatures { display: grid; gap: 30px; grid-template-columns: repeat(2, 1fr); margin-top: 34px; }
+    .line { border-top: 1px solid #111; padding-top: 5px; }
+    @media print { body { margin: 16px; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Work Order / Invoice Draft</h1>
+      <p class="muted">Generated ${htmlEscape(new Date().toLocaleString())}</p>
+    </div>
+    <div>
+      <h2>${htmlEscape(workorder.number)}</h2>
+      <p>Status: ${htmlEscape(workorder.status)}</p>
+      <p>Date In: ${htmlEscape(workorder.createdAt || '')}</p>
+    </div>
+  </header>
+
+  <section class="grid">
+    <div class="box">
+      <h2>Customer</h2>
+      <p><strong>${htmlEscape(workorder.customerName || 'No customer')}</strong></p>
+      <p>${htmlEscape(workorder.customerPhone || '')}</p>
+      <p>${htmlEscape(workorder.customerEmail || '')}</p>
+      <p>${htmlEscape(workorder.customerNotes || '')}</p>
+    </div>
+    <div class="box">
+      <h2>Machine</h2>
+      <p><strong>${htmlEscape(workorder.equipmentName || 'No equipment')}</strong></p>
+      <p>${htmlEscape([workorder.year, workorder.make, workorder.model].filter(Boolean).join(' '))}</p>
+      <p>Fleet/Unit: ${htmlEscape(workorder.unitNumber || '')}</p>
+      <p>Serial: ${htmlEscape(workorder.serial || '')}</p>
+      <p>VIN: ${htmlEscape(workorder.vin || '')}</p>
+      <p>Hours/Mileage: ${htmlEscape([workorder.hours, workorder.mileage].filter(Boolean).join(' / '))}</p>
+    </div>
+  </section>
+
+  <h2>Drop-Off / Complaint</h2>
+  <div class="box">${htmlEscape(workorder.complaint || '').replace(/\n/g, '<br>') || 'No complaint recorded.'}</div>
+
+  <h2>Diagnosis / Work Notes</h2>
+  <div class="box">${htmlEscape(workorder.diagnosis || workorder.laborNotes || '').replace(/\n/g, '<br>') || 'No notes recorded.'}</div>
+
+  ${photos ? `<h2>Machine Intake Photos</h2><div class="photos">${photos}</div>` : ''}
+
+  <h2>Parts Replaced / Parts Used</h2>
+  <table>
+    <thead>
+      <tr><th>Qty</th><th>Part # / Code</th><th>Description</th><th class="num">Retail</th><th class="num">Line Total</th></tr>
+    </thead>
+    <tbody>${partsRows}</tbody>
+  </table>
+
+  <h2>Labor / Totals</h2>
+  <div class="totals">
+    <div><span>Parts Retail</span><strong>${money(partsRetail)}</strong></div>
+    <div><span>Labor (${htmlEscape(workorder.laborHours || 0)} hrs @ ${money(workorder.laborRate)})</span><strong>${money(laborTotal)}</strong></div>
+    <div><span>Parts Cost</span><span>${money(partsCost)}</span></div>
+    <div class="grand"><span>Total</span><strong>${money(grandTotal)}</strong></div>
+  </div>
+
+  <div class="signatures">
+    <div class="line">Customer Signature</div>
+    <div class="line">Technician</div>
+  </div>
+</body>
+</html>`;
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${fileSafeNumber}-workorder.html"`);
+    res.send(html);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Failed to export workorder');
+  }
 });
 
 app.post('/api/workorders', requireRole('owner', 'tech'), (req, res) => {

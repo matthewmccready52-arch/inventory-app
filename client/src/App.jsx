@@ -394,6 +394,31 @@ export default function App() {
     loadAll()
   }
 
+  async function exportSelectedWorkorder() {
+    if (!selectedWorkorder) {
+      setStatus('Select a workorder to export.')
+      return
+    }
+
+    const res = await apiFetch(`${API}/workorders/${selectedWorkorder.id}/export`)
+    if (!res.ok) {
+      setStatus('Failed to export workorder.')
+      return
+    }
+
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const fileName = `${selectedWorkorder.number || `WO-${selectedWorkorder.id}`}-workorder.html`.replace(/[^a-zA-Z0-9._-]/g, '-')
+    const link = document.createElement('a')
+    link.href = url
+    link.download = fileName.endsWith('.html') ? fileName : `${fileName}.html`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+    setStatus('Workorder export downloaded. Attach it to an email or print it to PDF.')
+  }
+
   async function savePart() {
     if (!canWrite) {
       setStatus('Sign in as Owner or Tech to change inventory.')
@@ -1441,7 +1466,12 @@ export default function App() {
           <div className="panel wide-panel">
             <div className="panel-title-row">
               <h3>{selectedWorkorder ? `${selectedWorkorder.number} - ${selectedWorkorder.title}` : 'Workorder Detail'}</h3>
-              {selectedWorkorder && <strong>{selectedWorkorder.status}</strong>}
+              {selectedWorkorder && (
+                <div className="label-actions">
+                  <strong>{selectedWorkorder.status}</strong>
+                  <button onClick={exportSelectedWorkorder}>Export for Email</button>
+                </div>
+              )}
             </div>
             {selectedWorkorder ? (
               <>
