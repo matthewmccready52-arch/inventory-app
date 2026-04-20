@@ -154,6 +154,8 @@ function createSystemTables() {
       model TEXT,
       vin TEXT,
       serial TEXT,
+      serialPhotoUrl TEXT,
+      fleetPhotoUrl TEXT,
       unitNumber TEXT,
       mileage TEXT,
       hours TEXT,
@@ -277,6 +279,17 @@ function ensureSchema() {
     ensureColumn('transactions', names, 'customerRef', 'TEXT');
     ensureColumn('transactions', names, 'equipmentRef', 'TEXT');
     ensureColumn('transactions', names, 'unitCost', 'REAL DEFAULT 0');
+  });
+
+  db.all('PRAGMA table_info(equipment)', [], (err, columns) => {
+    if (err) {
+      console.error('Failed to inspect equipment schema', err);
+      return;
+    }
+
+    const names = columns.map((column) => column.name);
+    ensureColumn('equipment', names, 'serialPhotoUrl', 'TEXT');
+    ensureColumn('equipment', names, 'fleetPhotoUrl', 'TEXT');
   });
 }
 
@@ -549,6 +562,8 @@ app.post('/api/equipment', requireRole('owner', 'tech'), (req, res) => {
     model: String(req.body.model || '').trim(),
     vin: String(req.body.vin || '').trim(),
     serial: String(req.body.serial || '').trim(),
+    serialPhotoUrl: String(req.body.serialPhotoUrl || '').trim(),
+    fleetPhotoUrl: String(req.body.fleetPhotoUrl || '').trim(),
     unitNumber: String(req.body.unitNumber || '').trim(),
     mileage: String(req.body.mileage || '').trim(),
     hours: String(req.body.hours || '').trim(),
@@ -559,8 +574,8 @@ app.post('/api/equipment', requireRole('owner', 'tech'), (req, res) => {
 
   db.run(
     `INSERT INTO equipment (
-      customerId, name, year, make, model, vin, serial, unitNumber, mileage, hours, notes
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      customerId, name, year, make, model, vin, serial, serialPhotoUrl, fleetPhotoUrl, unitNumber, mileage, hours, notes
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     Object.values(fields),
     function (err) {
       if (err) {

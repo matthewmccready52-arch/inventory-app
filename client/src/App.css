@@ -84,6 +84,24 @@ label,
   padding: 12px 14px;
 }
 
+.app-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.app-tabs button {
+  min-width: 130px;
+}
+
+.active-tab {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #061310;
+  font-weight: 800;
+}
+
 .toolbar {
   display: grid;
   grid-template-columns: minmax(220px, 1fr) minmax(280px, 680px);
@@ -227,6 +245,25 @@ textarea {
 .selected-row {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+.selected-contact {
+  background: var(--surface-strong);
+  border-color: var(--accent) !important;
+}
+
+.intake-photo-row {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.intake-photo-row img {
+  aspect-ratio: 4 / 3;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  object-fit: cover;
+  width: 100%;
 }
 
 .workorder-part-form {
@@ -662,6 +699,7 @@ textarea {
 
   .stats-grid,
   .field-grid,
+  .intake-photo-row,
   .part-meta,
   .scan-form,
   .server-setting,

@@ -102,6 +102,8 @@ CREATE TABLE IF NOT EXISTS equipment (
   model TEXT,
   vin TEXT,
   serial TEXT,
+  serialPhotoUrl TEXT,
+  fleetPhotoUrl TEXT,
   unitNumber TEXT,
   mileage TEXT,
   hours TEXT,

@@ -60,6 +60,8 @@ const emptyEquipmentForm = {
   model: '',
   vin: '',
   serial: '',
+  serialPhotoUrl: '',
+  fleetPhotoUrl: '',
   unitNumber: '',
   mileage: '',
   hours: '',
@@ -103,6 +105,7 @@ export default function App() {
   const [loginForm, setLoginForm] = useState({ name: 'Owner', pin: '' })
   const [userForm, setUserForm] = useState({ name: '', role: 'tech', pin: '' })
   const [search, setSearch] = useState('')
+  const [activeTab, setActiveTab] = useState('inventory')
   const [barcodeLookup, setBarcodeLookup] = useState('')
   const [scannerMode, setScannerMode] = useState('lookup')
   const [status, setStatus] = useState('')
@@ -880,6 +883,21 @@ export default function App() {
     reader.readAsDataURL(file)
   }
 
+  function loadEquipmentImage(file, field) {
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = async () => {
+      try {
+        const imageUrl = await uploadDataUrl(String(reader.result || ''), file.name)
+        updateForm(setEquipmentForm, field, imageUrl)
+        setStatus(field === 'serialPhotoUrl' ? 'Serial number photo uploaded.' : 'Fleet number photo uploaded.')
+      } catch (err) {
+        setStatus(err.message)
+      }
+    }
+    reader.readAsDataURL(file)
+  }
+
   function downloadPartsCsv() {
     window.location.href = `${API}/parts/export`
   }
@@ -1080,6 +1098,18 @@ export default function App() {
 
       {status && <div className="status-bar">{status}</div>}
 
+      <nav className="app-tabs" aria-label="App sections">
+        <button className={activeTab === 'inventory' ? 'active-tab' : ''} onClick={() => setActiveTab('inventory')}>
+          Inventory
+        </button>
+        <button className={activeTab === 'workorders' ? 'active-tab' : ''} onClick={() => setActiveTab('workorders')}>
+          Workorders
+        </button>
+        <button className={activeTab === 'admin' ? 'active-tab' : ''} onClick={() => setActiveTab('admin')}>
+          Admin
+        </button>
+      </nav>
+
       <section className="session-panel">
         {currentUser ? (
           <>
@@ -1120,6 +1150,8 @@ export default function App() {
         )}
       </section>
 
+      {activeTab === 'inventory' && (
+      <>
       <section className="toolbar" aria-label="Search and scan">
         <label>
           Search everything
@@ -1243,6 +1275,7 @@ export default function App() {
         </section>
       )}
 
+      {activeTab === 'workorders' && (
       <section className="workorder-panel">
         <div className="panel-title-row">
           <div>
@@ -1254,7 +1287,7 @@ export default function App() {
 
         <div className="workorder-layout">
           <div className="panel">
-            <h3>Add Customer</h3>
+            <h3>Customer Contacts</h3>
             <div className="mini-form stack-form">
               <input placeholder="Customer name" value={customerForm.name} onChange={(e) => updateForm(setCustomerForm, 'name', e.target.value)} />
               <input placeholder="Phone" value={customerForm.phone} onChange={(e) => updateForm(setCustomerForm, 'phone', e.target.value)} />
@@ -1263,9 +1296,18 @@ export default function App() {
               <button onClick={addCustomer} disabled={!canWrite}>Add Customer</button>
             </div>
             <div className="compact-list">
-              {customers.slice(0, 4).map((customer) => (
-                <div key={customer.id}>
+              {customers.map((customer) => (
+                <div
+                  key={customer.id}
+                  className={String(workorderForm.customerId) === String(customer.id) ? 'selected-contact' : ''}
+                >
                   <span><strong>{customer.name}</strong> {customer.phone && `- ${customer.phone}`}</span>
+                  <button onClick={() => {
+                    updateForm(setWorkorderForm, 'customerId', String(customer.id))
+                    updateForm(setEquipmentForm, 'customerId', String(customer.id))
+                  }}>
+                    Pick
+                  </button>
                 </div>
               ))}
               {customers.length === 0 && <div className="empty-state">No customers yet.</div>}
@@ -1281,14 +1323,29 @@ export default function App() {
                   <option key={customer.id} value={customer.id}>{customer.name}</option>
                 ))}
               </select>
-              <input placeholder="Name or unit" value={equipmentForm.name} onChange={(e) => updateForm(setEquipmentForm, 'name', e.target.value)} />
-              <input placeholder="Year / make / model" value={[equipmentForm.year, equipmentForm.make, equipmentForm.model].filter(Boolean).join(' ')} onChange={(e) => {
-                const [year = '', make = '', ...model] = e.target.value.split(' ')
-                setEquipmentForm((current) => ({ ...current, year, make, model: model.join(' ') }))
-              }} />
-              <input placeholder="VIN / serial" value={equipmentForm.vin || equipmentForm.serial} onChange={(e) => updateForm(setEquipmentForm, 'vin', e.target.value)} />
+              <input placeholder="Fleet / unit number" value={equipmentForm.unitNumber} onChange={(e) => updateForm(setEquipmentForm, 'unitNumber', e.target.value)} />
+              <input placeholder="Machine name" value={equipmentForm.name} onChange={(e) => updateForm(setEquipmentForm, 'name', e.target.value)} />
+              <input placeholder="Brand / make" value={equipmentForm.make} onChange={(e) => updateForm(setEquipmentForm, 'make', e.target.value)} />
+              <input placeholder="Model" value={equipmentForm.model} onChange={(e) => updateForm(setEquipmentForm, 'model', e.target.value)} />
+              <input placeholder="Year" value={equipmentForm.year} onChange={(e) => updateForm(setEquipmentForm, 'year', e.target.value)} />
+              <input placeholder="Serial number" value={equipmentForm.serial} onChange={(e) => updateForm(setEquipmentForm, 'serial', e.target.value)} />
+              <input placeholder="VIN" value={equipmentForm.vin} onChange={(e) => updateForm(setEquipmentForm, 'vin', e.target.value)} />
+              <label className="restore-picker">
+                Serial # Photo
+                <input type="file" accept="image/*" capture="environment" onChange={(e) => loadEquipmentImage(e.target.files[0], 'serialPhotoUrl')} />
+              </label>
+              <label className="restore-picker">
+                Fleet # Photo
+                <input type="file" accept="image/*" capture="environment" onChange={(e) => loadEquipmentImage(e.target.files[0], 'fleetPhotoUrl')} />
+              </label>
               <button onClick={addEquipment} disabled={!canWrite}>Add Equipment</button>
             </div>
+            {(equipmentForm.serialPhotoUrl || equipmentForm.fleetPhotoUrl) && (
+              <div className="intake-photo-row">
+                {equipmentForm.serialPhotoUrl && <img src={assetUrl(equipmentForm.serialPhotoUrl)} alt="" />}
+                {equipmentForm.fleetPhotoUrl && <img src={assetUrl(equipmentForm.fleetPhotoUrl)} alt="" />}
+              </div>
+            )}
             <div className="compact-list">
               {equipment.slice(0, 4).map((item) => (
                 <div key={item.id}>
@@ -1450,6 +1507,7 @@ export default function App() {
           </div>
         </div>
       </section>
+      )}
 
       <section className="forms-grid" aria-label="Add inventory records">
         <div className="panel wide-panel">
@@ -1860,7 +1918,11 @@ export default function App() {
           </div>
         )}
       </section>
+      </>
+      )}
 
+      {activeTab === 'admin' && (
+      <>
       <section className="manage-grid">
         <div>
           <h2>Categories</h2>
@@ -2003,6 +2065,8 @@ export default function App() {
           ))
         )}
       </section>
+      </>
+      )}
     </main>
   )
 }
