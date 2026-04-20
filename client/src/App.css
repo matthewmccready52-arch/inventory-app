@@ -33,13 +33,14 @@
 
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(110px, 1fr));
+  grid-template-columns: repeat(4, minmax(110px, 1fr));
   gap: 10px;
 }
 
 .stats-grid > div,
 .panel,
 .low-stock,
+.purchase-panel,
 .parts-section,
 .manage-grid > div,
 .transactions {
@@ -84,7 +85,7 @@ label,
 
 .toolbar {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(280px, 520px);
+  grid-template-columns: minmax(220px, 1fr) minmax(280px, 680px);
   gap: 14px;
   margin-bottom: 16px;
 }
@@ -92,7 +93,7 @@ label,
 .scan-form {
   align-items: end;
   display: grid;
-  grid-template-columns: 1fr auto auto;
+  grid-template-columns: minmax(130px, 170px) 1fr auto auto;
   gap: 10px;
 }
 
@@ -129,17 +130,23 @@ textarea {
 
 .panel,
 .low-stock,
+.purchase-panel,
 .parts-section,
 .manage-grid > div,
 .transactions,
 .import-panel,
 .ops-panel,
+.session-panel,
+.admin-grid,
 .labels-sheet {
   padding: 18px;
 }
 
 .import-panel,
 .ops-panel,
+.session-panel,
+.purchase-panel,
+.admin-grid,
 .labels-sheet {
   background: linear-gradient(180deg, var(--surface-raised), var(--surface));
   border: 1px solid var(--border);
@@ -152,9 +159,33 @@ textarea {
 
 .import-panel p,
 .ops-panel p,
+.session-panel p,
+.purchase-panel p,
 .phone-help {
   color: var(--muted);
   margin-top: 6px;
+}
+
+.session-panel {
+  align-items: end;
+  grid-template-columns: 1fr auto;
+}
+
+.login-form {
+  align-items: end;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 1fr minmax(140px, 190px) minmax(120px, 160px) auto;
+}
+
+.admin-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.mini-form {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(130px, 1fr) 120px 100px auto;
 }
 
 .server-setting {
@@ -288,6 +319,10 @@ textarea {
   margin-bottom: 16px;
 }
 
+.purchase-panel {
+  margin-bottom: 16px;
+}
+
 .alert-list,
 .compact-list {
   display: grid;
@@ -402,7 +437,7 @@ textarea {
 .stock-controls {
   align-items: center;
   display: grid;
-  grid-template-columns: 86px minmax(120px, 1fr) auto auto;
+  grid-template-columns: 70px repeat(4, minmax(110px, 1fr)) auto auto;
   gap: 8px;
   margin-top: 12px;
 }
@@ -413,6 +448,13 @@ textarea {
 
 .stock-note {
   min-width: 0;
+}
+
+.count-controls {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(120px, 1fr) auto;
+  margin-top: 8px;
 }
 
 .manage-grid {
@@ -518,12 +560,18 @@ textarea {
   .app-header,
   .toolbar,
   .forms-grid,
+  .admin-grid,
   .manage-grid {
     grid-template-columns: 1fr;
   }
 
   .stats-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .login-form,
+  .mini-form {
+    grid-template-columns: 1fr;
   }
 
   .field-grid {
@@ -545,6 +593,8 @@ textarea {
   .part-meta,
   .scan-form,
   .server-setting,
+  .session-panel,
+  .count-controls,
   .stock-controls {
     grid-template-columns: 1fr;
   }

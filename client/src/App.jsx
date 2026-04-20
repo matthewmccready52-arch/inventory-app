@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BrowserMultiFormatReader } from '@zxing/browser'
 import QRCode from 'qrcode'
 import './App.css'
@@ -15,6 +15,8 @@ const emptyPartForm = {
   quantity: 1,
   reorderThreshold: 0,
   reorderQty: 0,
+  unitCost: 0,
+  retailPrice: 0,
   supplier: '',
   supplierSku: '',
   fitment: '',
@@ -40,6 +42,8 @@ const csvHeaders = [
   'quantity',
   'reorderThreshold',
   'reorderQty',
+  'unitCost',
+  'retailPrice',
   'supplier',
   'supplierSku',
   'fitment',
@@ -52,13 +56,28 @@ export default function App() {
   const [locations, setLocations] = useState([])
   const [categories, setCategories] = useState([])
   const [transactions, setTransactions] = useState([])
+  const [users, setUsers] = useState([])
+  const [auditLogs, setAuditLogs] = useState([])
+  const [stockMovements, setStockMovements] = useState([])
+  const [currentUser, setCurrentUser] = useState(() => {
+    const saved = localStorage.getItem('inventory:currentUser')
+    return saved ? JSON.parse(saved) : null
+  })
+  const [loginForm, setLoginForm] = useState({ name: 'Owner', pin: '' })
+  const [userForm, setUserForm] = useState({ name: '', role: 'tech', pin: '' })
   const [search, setSearch] = useState('')
   const [barcodeLookup, setBarcodeLookup] = useState('')
+  const [scannerMode, setScannerMode] = useState('lookup')
   const [status, setStatus] = useState('')
   const [partForm, setPartForm] = useState(emptyPartForm)
   const [editingId, setEditingId] = useState(null)
   const [stockQtyById, setStockQtyById] = useState({})
   const [stockNoteById, setStockNoteById] = useState({})
+  const [stockWorkorderById, setStockWorkorderById] = useState({})
+  const [stockCustomerById, setStockCustomerById] = useState({})
+  const [stockEquipmentById, setStockEquipmentById] = useState({})
+  const [countQtyById, setCountQtyById] = useState({})
+  const [countReason, setCountReason] = useState('Inventory count')
   const [csvText, setCsvText] = useState('')
   const [cameraOn, setCameraOn] = useState(false)
   const [editingCategoryId, setEditingCategoryId] = useState(null)
@@ -84,23 +103,42 @@ export default function App() {
   const [newCategoryParentId, setNewCategoryParentId] = useState('')
   const API = `${apiBase.replace(/\/$/, '')}/api`
   const ASSET_BASE = apiBase.replace(/\/$/, '')
+  const canWrite = currentUser && ['owner', 'tech'].includes(currentUser.role)
+  const canManage = currentUser?.role === 'owner'
 
-  async function loadAll() {
-    const [p, l, c, t] = await Promise.all([
+  function authHeaders(extra = {}) {
+    return currentUser ? { ...extra, 'x-user-id': String(currentUser.id) } : extra
+  }
+
+  function apiFetch(url, options = {}) {
+    return fetch(url, {
+      ...options,
+      headers: authHeaders(options.headers || {})
+    })
+  }
+
+  const loadAll = useCallback(async () => {
+    const [p, l, c, t, u, a, m] = await Promise.all([
       fetch(`${API}/parts`),
       fetch(`${API}/locations`),
       fetch(`${API}/categories`),
-      fetch(`${API}/transactions`)
+      fetch(`${API}/transactions`),
+      fetch(`${API}/users`),
+      fetch(`${API}/audit`),
+      fetch(`${API}/stock-movements`)
     ])
 
     setParts(await p.json())
     setLocations(await l.json())
     setCategories(await c.json())
     setTransactions(await t.json())
-  }
+    setUsers(await u.json())
+    setAuditLogs(await a.json())
+    setStockMovements(await m.json())
+  }, [API])
 
   useEffect(() => {
-    loadAll().catch(() => {
+    Promise.resolve().then(loadAll).catch(() => {
       setStatus('Could not reach the server. Make sure the backend is running.')
     })
     fetch(`${API}/health`)
@@ -109,7 +147,7 @@ export default function App() {
       .catch(() => {})
 
     return () => stopCamera()
-  }, [apiBase])
+  }, [API, apiBase, loadAll])
 
   useEffect(() => {
     function handleInstallPrompt(event) {
@@ -146,12 +184,60 @@ export default function App() {
       quantity: Number(form.quantity) || 0,
       reorderThreshold: Number(form.reorderThreshold) || 0,
       reorderQty: Number(form.reorderQty) || 0,
+      unitCost: Number(form.unitCost) || 0,
+      retailPrice: Number(form.retailPrice) || 0,
       categoryId: form.categoryId ? Number(form.categoryId) : null,
       locationId: form.locationId ? Number(form.locationId) : null
     }
   }
 
+  async function login(event) {
+    event.preventDefault()
+    const res = await fetch(`${API}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(loginForm)
+    })
+    const data = await res.json()
+    if (!res.ok) {
+      setStatus(data.error || 'Could not sign in.')
+      return
+    }
+    localStorage.setItem('inventory:currentUser', JSON.stringify(data.user))
+    setCurrentUser(data.user)
+    setLoginForm((current) => ({ ...current, pin: '' }))
+    setStatus(`Signed in as ${data.user.name}.`)
+    loadAll()
+  }
+
+  function logout() {
+    localStorage.removeItem('inventory:currentUser')
+    setCurrentUser(null)
+    setStatus('Signed out.')
+  }
+
+  async function addUser() {
+    if (!canManage) return
+    const res = await apiFetch(`${API}/users`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(userForm)
+    })
+    const data = await res.json()
+    if (!res.ok) {
+      setStatus(data.error || 'Failed to add user.')
+      return
+    }
+    setUserForm({ name: '', role: 'tech', pin: '' })
+    setStatus('User added.')
+    loadAll()
+  }
+
   async function savePart() {
+    if (!canWrite) {
+      setStatus('Sign in as Owner or Tech to change inventory.')
+      return
+    }
     if (!partForm.name.trim()) {
       setStatus('Part name is required.')
       return
@@ -159,7 +245,7 @@ export default function App() {
 
     const url = editingId ? `${API}/parts/${editingId}` : `${API}/parts`
     const method = editingId ? 'PUT' : 'POST'
-    const res = await fetch(url, {
+    const res = await apiFetch(url, {
       method,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(toPayload(partForm))
@@ -198,7 +284,7 @@ export default function App() {
     const ok = window.confirm(`Delete part "${name}"? This removes it from inventory.`)
     if (!ok) return
 
-    const res = await fetch(`${API}/parts/${id}`, { method: 'DELETE' })
+    const res = await apiFetch(`${API}/parts/${id}`, { method: 'DELETE' })
     const data = await res.json()
 
     if (!res.ok) {
@@ -213,7 +299,7 @@ export default function App() {
   async function addLocation() {
     if (!newLocationName.trim()) return
 
-    await fetch(`${API}/locations`, {
+    await apiFetch(`${API}/locations`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -233,7 +319,7 @@ export default function App() {
   async function addCategory() {
     if (!newCategoryName.trim()) return
 
-    await fetch(`${API}/categories`, {
+    await apiFetch(`${API}/categories`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -252,7 +338,7 @@ export default function App() {
     const ok = window.confirm(`Delete category "${name}"?`)
     if (!ok) return
 
-    const res = await fetch(`${API}/categories/${id}`, { method: 'DELETE' })
+    const res = await apiFetch(`${API}/categories/${id}`, { method: 'DELETE' })
     const data = await res.json()
 
     if (!res.ok) {
@@ -268,7 +354,7 @@ export default function App() {
     const ok = window.confirm(`Delete location "${name}"?`)
     if (!ok) return
 
-    const res = await fetch(`${API}/locations/${id}`, { method: 'DELETE' })
+    const res = await apiFetch(`${API}/locations/${id}`, { method: 'DELETE' })
     const data = await res.json()
 
     if (!res.ok) {
@@ -287,10 +373,16 @@ export default function App() {
       return
     }
 
-    const res = await fetch(`${API}/parts/${id}/${action}`, {
+    const res = await apiFetch(`${API}/parts/${id}/${action}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ qty, note: stockNoteById[id] || '' })
+      body: JSON.stringify({
+        qty,
+        note: stockNoteById[id] || '',
+        workorderRef: stockWorkorderById[id] || '',
+        customerRef: stockCustomerById[id] || '',
+        equipmentRef: stockEquipmentById[id] || ''
+      })
     })
 
     if (!res.ok) {
@@ -301,6 +393,34 @@ export default function App() {
 
     setStatus(action === 'checkout' ? `Checked out ${qty}.` : `Returned ${qty}.`)
     setStockNoteById((current) => ({ ...current, [id]: '' }))
+    loadAll()
+  }
+
+  async function saveCount(part) {
+    if (!canWrite) {
+      setStatus('Sign in as Owner or Tech to save inventory counts.')
+      return
+    }
+
+    const quantity = Number(countQtyById[part.id])
+    if (!Number.isFinite(quantity) || quantity < 0) {
+      setStatus('Counted quantity must be zero or greater.')
+      return
+    }
+
+    const res = await apiFetch(`${API}/parts/${part.id}/count`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ quantity, reason: countReason })
+    })
+    const data = await res.json()
+    if (!res.ok) {
+      setStatus(data.error || 'Failed to save count.')
+      return
+    }
+
+    setStatus(`Count saved for ${part.name}. Adjustment: ${data.qtyChange > 0 ? '+' : ''}${data.qtyChange}.`)
+    setCountQtyById((current) => ({ ...current, [part.id]: '' }))
     loadAll()
   }
 
@@ -332,6 +452,18 @@ export default function App() {
   }
 
   const lowStockParts = useMemo(() => parts.filter(isLowStock), [parts])
+  const purchaseList = useMemo(() => lowStockParts.map((part) => {
+    const suggestedQty = Number(part.reorderQty) || Math.max(1, Number(part.reorderThreshold || 0) - Number(part.quantity || 0) + 1)
+    return {
+      ...part,
+      suggestedQty,
+      estimatedCost: suggestedQty * (Number(part.unitCost) || 0)
+    }
+  }), [lowStockParts])
+  const inventoryValue = useMemo(
+    () => parts.reduce((total, part) => total + (Number(part.quantity) || 0) * (Number(part.unitCost) || 0), 0),
+    [parts]
+  )
 
   const duplicateCodes = useMemo(() => {
     const seen = {}
@@ -427,6 +559,22 @@ export default function App() {
 
     setBarcodeLookup(trimmed)
     setSearch(trimmed)
+    if (match && scannerMode === 'checkout') {
+      changeStock(match.id, 'checkout')
+      setStatus(`Scanner checkout queued for ${match.name}.`)
+      return
+    }
+    if (match && scannerMode === 'return') {
+      changeStock(match.id, 'return')
+      setStatus(`Scanner return queued for ${match.name}.`)
+      return
+    }
+    if (!match && scannerMode === 'add') {
+      setPartForm((current) => ({ ...current, barcode: trimmed, internalCode: current.internalCode || trimmed }))
+      setStatus('No match. Code copied into the add part form.')
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+      return
+    }
     setStatus(match ? `Found ${match.name}.` : 'No exact barcode, code, or part number match.')
   }
 
@@ -504,7 +652,7 @@ export default function App() {
       return
     }
 
-    const res = await fetch(`${API}/parts/import`, {
+    const res = await apiFetch(`${API}/parts/import`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ parts: importedParts })
@@ -530,7 +678,7 @@ export default function App() {
   }
 
   function uploadDataUrl(dataUrl, fileName) {
-    return fetch(`${API}/uploads/image`, {
+    return apiFetch(`${API}/uploads/image`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ dataUrl, fileName })
@@ -591,7 +739,7 @@ export default function App() {
   }
 
   async function saveCategoryEdit(id) {
-    const res = await fetch(`${API}/categories/${id}`, {
+    const res = await apiFetch(`${API}/categories/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -617,7 +765,7 @@ export default function App() {
   }
 
   async function saveLocationEdit(id) {
-    const res = await fetch(`${API}/locations/${id}`, {
+    const res = await apiFetch(`${API}/locations/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -667,7 +815,7 @@ export default function App() {
 
   async function saveTransactionNote(transaction) {
     const note = transactionDrafts[transaction.id] ?? transaction.note ?? ''
-    const res = await fetch(`${API}/transactions/${transaction.id}`, {
+    const res = await apiFetch(`${API}/transactions/${transaction.id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ note })
@@ -684,7 +832,7 @@ export default function App() {
   async function deleteTransaction(transaction) {
     const ok = window.confirm(`Delete this ${transaction.type} transaction? Stock quantity will not be changed.`)
     if (!ok) return
-    const res = await fetch(`${API}/transactions/${transaction.id}`, { method: 'DELETE' })
+    const res = await apiFetch(`${API}/transactions/${transaction.id}`, { method: 'DELETE' })
     const data = await res.json()
     if (!res.ok) {
       setStatus(data.error || 'Failed to delete transaction.')
@@ -747,10 +895,54 @@ export default function App() {
             <strong>{lowStockParts.length}</strong>
             <span>Low stock</span>
           </div>
+          <div>
+            <strong>${inventoryValue.toFixed(0)}</strong>
+            <span>Stock value</span>
+          </div>
         </div>
       </header>
 
       {status && <div className="status-bar">{status}</div>}
+
+      <section className="session-panel">
+        {currentUser ? (
+          <>
+            <div>
+              <h2>{currentUser.name}</h2>
+              <p>{currentUser.role} access is active.</p>
+            </div>
+            <button onClick={logout}>Sign Out</button>
+          </>
+        ) : (
+          <form className="login-form" onSubmit={login}>
+            <div>
+              <h2>Sign In</h2>
+              <p>Default PINs: Owner 1234, Tech 2468, Viewer 0000.</p>
+            </div>
+            <label>
+              User
+              <select value={loginForm.name} onChange={(e) => setLoginForm((current) => ({ ...current, name: e.target.value }))}>
+                {users.map((user) => (
+                  <option key={user.id} value={user.name}>
+                    {user.name} ({user.role})
+                  </option>
+                ))}
+                {users.length === 0 && <option value="Owner">Owner</option>}
+              </select>
+            </label>
+            <label>
+              PIN
+              <input
+                type="password"
+                inputMode="numeric"
+                value={loginForm.pin}
+                onChange={(e) => setLoginForm((current) => ({ ...current, pin: e.target.value }))}
+              />
+            </label>
+            <button className="primary-action" type="submit">Sign In</button>
+          </form>
+        )}
+      </section>
 
       <section className="toolbar" aria-label="Search and scan">
         <label>
@@ -762,6 +954,15 @@ export default function App() {
           />
         </label>
         <form className="scan-form" onSubmit={scanLookup}>
+          <label>
+            Scan action
+            <select value={scannerMode} onChange={(e) => setScannerMode(e.target.value)}>
+              <option value="lookup">Find part</option>
+              <option value="checkout">Checkout 1</option>
+              <option value="return">Return 1</option>
+              <option value="add">Add new code</option>
+            </select>
+          </label>
           <label>
             Barcode scanner
             <input
@@ -820,6 +1021,10 @@ export default function App() {
           </label>
           <button onClick={saveApiBase}>Save Server URL</button>
         </div>
+        <label>
+          Inventory count reason
+          <input value={countReason} onChange={(e) => setCountReason(e.target.value)} />
+        </label>
       </section>
 
       {lowStockParts.length > 0 && (
@@ -831,6 +1036,30 @@ export default function App() {
                 <strong>{part.name}</strong>
                 <span>
                   Qty {part.quantity} / reorder at {part.reorderThreshold}
+                </span>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {purchaseList.length > 0 && (
+        <section className="purchase-panel">
+          <div className="panel-title-row">
+            <div>
+              <h2>Reorder List</h2>
+              <p>Use this as a purchase order starter for suppliers.</p>
+            </div>
+            <strong>${purchaseList.reduce((total, part) => total + part.estimatedCost, 0).toFixed(2)}</strong>
+          </div>
+          <div className="compact-list">
+            {purchaseList.map((part) => (
+              <div key={part.id}>
+                <span>
+                  <strong>{part.name}</strong> - {part.supplier || 'No supplier'} {part.supplierSku && `(${part.supplierSku})`}
+                </span>
+                <span>
+                  Order {part.suggestedQty} - est. ${part.estimatedCost.toFixed(2)}
                 </span>
               </div>
             ))}
@@ -890,6 +1119,26 @@ export default function App() {
                 min="0"
                 value={partForm.reorderQty}
                 onChange={(e) => updatePartForm('reorderQty', e.target.value)}
+              />
+            </label>
+            <label>
+              Unit cost
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={partForm.unitCost}
+                onChange={(e) => updatePartForm('unitCost', e.target.value)}
+              />
+            </label>
+            <label>
+              Retail price
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={partForm.retailPrice}
+                onChange={(e) => updatePartForm('retailPrice', e.target.value)}
               />
             </label>
             <label>
@@ -957,7 +1206,7 @@ export default function App() {
             </div>
           )}
           {partForm.imageUrl && <img className="form-photo-preview" src={assetUrl(partForm.imageUrl)} alt="" />}
-          <button className="primary-action" onClick={savePart}>
+          <button className="primary-action" onClick={savePart} disabled={!canWrite}>
             {editingId ? 'Save Changes' : 'Add Part'}
           </button>
         </div>
@@ -979,7 +1228,7 @@ export default function App() {
               ))}
             </select>
           </label>
-          <button onClick={addCategory}>Add Category</button>
+          <button onClick={addCategory} disabled={!canWrite}>Add Category</button>
         </div>
 
         <div className="panel">
@@ -1010,7 +1259,7 @@ export default function App() {
               ))}
             </select>
           </label>
-          <button onClick={addLocation}>Add Location</button>
+          <button onClick={addLocation} disabled={!canWrite}>Add Location</button>
         </div>
       </section>
 
@@ -1025,7 +1274,60 @@ export default function App() {
           value={csvText}
           onChange={(e) => setCsvText(e.target.value)}
         />
-        <button onClick={importCsv}>Import CSV</button>
+        <button onClick={importCsv} disabled={!canManage}>Import CSV</button>
+      </section>
+
+      <section className="admin-grid">
+        <div className="panel">
+          <h2>Users</h2>
+          <div className="compact-list">
+            {users.map((user) => (
+              <div key={user.id}>
+                <span>
+                  <strong>{user.name}</strong> - {user.role}
+                </span>
+                <span>{user.active ? 'Active' : 'Disabled'}</span>
+              </div>
+            ))}
+          </div>
+          <div className="mini-form">
+            <input
+              placeholder="New user name"
+              value={userForm.name}
+              onChange={(e) => setUserForm((current) => ({ ...current, name: e.target.value }))}
+            />
+            <select value={userForm.role} onChange={(e) => setUserForm((current) => ({ ...current, role: e.target.value }))}>
+              <option value="owner">Owner</option>
+              <option value="tech">Tech</option>
+              <option value="viewer">Viewer</option>
+            </select>
+            <input
+              placeholder="PIN"
+              type="password"
+              inputMode="numeric"
+              value={userForm.pin}
+              onChange={(e) => setUserForm((current) => ({ ...current, pin: e.target.value }))}
+            />
+            <button onClick={addUser} disabled={!canManage}>Add User</button>
+          </div>
+        </div>
+        <div className="panel">
+          <h2>Stock Movement Ledger</h2>
+          <div className="compact-list">
+            {stockMovements.slice(0, 8).map((movement) => (
+              <div key={movement.id}>
+                <span>
+                  <strong>{movement.partName || 'Unknown part'}</strong> - {movement.movementType}
+                  {movement.workorderRef && ` - WO ${movement.workorderRef}`}
+                </span>
+                <span>
+                  {movement.qtyChange > 0 ? `+${movement.qtyChange}` : movement.qtyChange} by {movement.userName || 'System'}
+                </span>
+              </div>
+            ))}
+            {stockMovements.length === 0 && <div className="empty-state">No stock movements yet.</div>}
+          </div>
+        </div>
       </section>
 
       <section className="parts-section">
@@ -1064,6 +1366,8 @@ export default function App() {
                   <span>Location: {getPath(p.locationId, locMap)}</span>
                   <span>Condition: {p.condition || 'None'}</span>
                   <span>Supplier: {p.supplier || 'None'}</span>
+                  <span>Cost: ${Number(p.unitCost || 0).toFixed(2)}</span>
+                  <span>Retail: ${Number(p.retailPrice || 0).toFixed(2)}</span>
                 </div>
                 {p.fitment && <p className="note-line">Fits: {p.fitment}</p>}
                 {p.notes && <p className="note-line">{p.notes}</p>}
@@ -1082,12 +1386,44 @@ export default function App() {
                     onChange={(e) => setStockNoteById((current) => ({ ...current, [p.id]: e.target.value }))}
                     aria-label={`Reason for ${p.name}`}
                   />
-                  <button onClick={() => changeStock(p.id, 'checkout')}>Checkout</button>
-                  <button onClick={() => changeStock(p.id, 'return')}>Return</button>
+                  <input
+                    className="stock-note"
+                    placeholder="Workorder"
+                    value={stockWorkorderById[p.id] || ''}
+                    onChange={(e) => setStockWorkorderById((current) => ({ ...current, [p.id]: e.target.value }))}
+                    aria-label={`Workorder for ${p.name}`}
+                  />
+                  <input
+                    className="stock-note"
+                    placeholder="Customer"
+                    value={stockCustomerById[p.id] || ''}
+                    onChange={(e) => setStockCustomerById((current) => ({ ...current, [p.id]: e.target.value }))}
+                    aria-label={`Customer for ${p.name}`}
+                  />
+                  <input
+                    className="stock-note"
+                    placeholder="Vehicle/equipment"
+                    value={stockEquipmentById[p.id] || ''}
+                    onChange={(e) => setStockEquipmentById((current) => ({ ...current, [p.id]: e.target.value }))}
+                    aria-label={`Vehicle or equipment for ${p.name}`}
+                  />
+                  <button onClick={() => changeStock(p.id, 'checkout')} disabled={!canWrite}>Checkout</button>
+                  <button onClick={() => changeStock(p.id, 'return')} disabled={!canWrite}>Return</button>
+                </div>
+                <div className="count-controls">
+                  <input
+                    type="number"
+                    min="0"
+                    placeholder={`Counted qty: ${p.quantity}`}
+                    value={countQtyById[p.id] || ''}
+                    onChange={(e) => setCountQtyById((current) => ({ ...current, [p.id]: e.target.value }))}
+                    aria-label={`Counted quantity for ${p.name}`}
+                  />
+                  <button onClick={() => saveCount(p)} disabled={!canWrite}>Save Count</button>
                 </div>
                 <div className="button-row">
                   <button onClick={() => editPart(p)}>Edit</button>
-                  <button className="danger-button" onClick={() => deletePart(p.id, p.name)}>
+                  <button className="danger-button" onClick={() => deletePart(p.id, p.name)} disabled={!canManage}>
                     Delete
                   </button>
                 </div>
@@ -1169,13 +1505,13 @@ export default function App() {
                   )}
                   {editingCategoryId === c.id ? (
                     <>
-                      <button onClick={() => saveCategoryEdit(c.id)}>Save</button>
+                      <button onClick={() => saveCategoryEdit(c.id)} disabled={!canWrite}>Save</button>
                       <button onClick={() => setEditingCategoryId(null)}>Cancel</button>
                     </>
                   ) : (
                     <>
                       <button onClick={() => startCategoryEdit(c)}>Edit</button>
-                      <button onClick={() => deleteCategory(c.id, c.name)}>Delete</button>
+                      <button onClick={() => deleteCategory(c.id, c.name)} disabled={!canManage}>Delete</button>
                     </>
                   )}
                 </div>
@@ -1221,13 +1557,13 @@ export default function App() {
                   )}
                   {editingLocationId === l.id ? (
                     <>
-                      <button onClick={() => saveLocationEdit(l.id)}>Save</button>
+                      <button onClick={() => saveLocationEdit(l.id)} disabled={!canWrite}>Save</button>
                       <button onClick={() => setEditingLocationId(null)}>Cancel</button>
                     </>
                   ) : (
                     <>
                       <button onClick={() => startLocationEdit(l)}>Edit</button>
-                      <button onClick={() => deleteLocation(l.id, l.name)}>Delete</button>
+                      <button onClick={() => deleteLocation(l.id, l.name)} disabled={!canManage}>Delete</button>
                     </>
                   )}
                 </div>
@@ -1246,6 +1582,11 @@ export default function App() {
             <div key={t.id}>
               <span>{t.partName || 'Unknown part'}</span>
               <strong>{t.qtyChange > 0 ? `+${t.qtyChange}` : t.qtyChange}</strong>
+              {(t.workorderRef || t.customerRef || t.equipmentRef) && (
+                <small>
+                  {[t.workorderRef && `WO ${t.workorderRef}`, t.customerRef, t.equipmentRef].filter(Boolean).join(' - ')}
+                </small>
+              )}
               <input
                 value={transactionDrafts[t.id] ?? t.note ?? ''}
                 onChange={(e) => setTransactionDrafts((current) => ({ ...current, [t.id]: e.target.value }))}
@@ -1253,8 +1594,25 @@ export default function App() {
                 aria-label={`Note for transaction ${t.id}`}
               />
               <button onClick={() => saveTransactionNote(t)}>Save Note</button>
-              <button className="danger-button" onClick={() => deleteTransaction(t)}>Delete</button>
+              <button className="danger-button" onClick={() => deleteTransaction(t)} disabled={!canManage}>Delete</button>
               <time>{t.timestamp}</time>
+            </div>
+          ))
+        )}
+      </section>
+
+      <section className="transactions">
+        <h2>Audit Log</h2>
+        {auditLogs.length === 0 ? (
+          <div className="empty-state">No audit events yet.</div>
+        ) : (
+          auditLogs.slice(0, 10).map((entry) => (
+            <div key={entry.id}>
+              <span>
+                <strong>{entry.userName || 'System'}</strong> {entry.action} {entry.entityType || 'record'}
+              </span>
+              <small>{entry.details || ''}</small>
+              <time>{entry.timestamp}</time>
             </div>
           ))
         )}
