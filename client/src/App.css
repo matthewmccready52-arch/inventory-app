@@ -41,6 +41,7 @@
 .panel,
 .low-stock,
 .purchase-panel,
+.workorder-panel,
 .parts-section,
 .manage-grid > div,
 .transactions {
@@ -131,6 +132,7 @@ textarea {
 .panel,
 .low-stock,
 .purchase-panel,
+.workorder-panel,
 .parts-section,
 .manage-grid > div,
 .transactions,
@@ -146,6 +148,7 @@ textarea {
 .ops-panel,
 .session-panel,
 .purchase-panel,
+.workorder-panel,
 .admin-grid,
 .labels-sheet {
   background: linear-gradient(180deg, var(--surface-raised), var(--surface));
@@ -186,6 +189,67 @@ textarea {
   display: grid;
   gap: 8px;
   grid-template-columns: minmax(130px, 1fr) 120px 100px auto;
+}
+
+.workorder-panel {
+  margin-bottom: 16px;
+}
+
+.workorder-layout {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 14px;
+}
+
+.workorder-layout .wide-panel,
+.workorder-detail .wide-panel {
+  grid-column: span 2;
+}
+
+.stack-form {
+  grid-template-columns: 1fr;
+}
+
+.workorder-detail {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(360px, 1.6fr) minmax(240px, 0.8fr);
+  margin-top: 14px;
+}
+
+.workorder-detail .compact-list button {
+  justify-content: flex-start;
+  text-align: left;
+  width: 100%;
+}
+
+.selected-row {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.workorder-part-form {
+  grid-template-columns: minmax(180px, 1fr) 82px 120px minmax(120px, 1fr) auto;
+  margin: 12px 0;
+}
+
+.invoice-draft {
+  align-content: start;
+}
+
+.invoice-line,
+.invoice-total {
+  align-items: center;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  padding-top: 10px;
+}
+
+.invoice-total {
+  color: var(--accent);
+  font-size: 20px;
 }
 
 .server-setting {
@@ -561,8 +625,15 @@ textarea {
   .toolbar,
   .forms-grid,
   .admin-grid,
+  .workorder-layout,
+  .workorder-detail,
   .manage-grid {
     grid-template-columns: 1fr;
+  }
+
+  .workorder-layout .wide-panel,
+  .workorder-detail .wide-panel {
+    grid-column: span 1;
   }
 
   .stats-grid {
@@ -570,7 +641,8 @@ textarea {
   }
 
   .login-form,
-  .mini-form {
+  .mini-form,
+  .workorder-part-form {
     grid-template-columns: 1fr;
   }
 

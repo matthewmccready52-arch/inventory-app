@@ -51,6 +51,34 @@ const csvHeaders = [
   'imageUrl'
 ]
 
+const emptyCustomerForm = { name: '', phone: '', email: '', notes: '' }
+const emptyEquipmentForm = {
+  customerId: '',
+  name: '',
+  year: '',
+  make: '',
+  model: '',
+  vin: '',
+  serial: '',
+  unitNumber: '',
+  mileage: '',
+  hours: '',
+  notes: ''
+}
+const emptyWorkorderForm = {
+  number: '',
+  title: '',
+  status: 'open',
+  customerId: '',
+  equipmentId: '',
+  complaint: '',
+  diagnosis: '',
+  laborNotes: '',
+  laborHours: 0,
+  laborRate: 0
+}
+const emptyWorkorderPartForm = { workorderId: '', partId: '', qty: 1, mode: 'reserve', note: '' }
+
 export default function App() {
   const [parts, setParts] = useState([])
   const [locations, setLocations] = useState([])
@@ -59,6 +87,15 @@ export default function App() {
   const [users, setUsers] = useState([])
   const [auditLogs, setAuditLogs] = useState([])
   const [stockMovements, setStockMovements] = useState([])
+  const [customers, setCustomers] = useState([])
+  const [equipment, setEquipment] = useState([])
+  const [workorders, setWorkorders] = useState([])
+  const [workorderParts, setWorkorderParts] = useState([])
+  const [customerForm, setCustomerForm] = useState(emptyCustomerForm)
+  const [equipmentForm, setEquipmentForm] = useState(emptyEquipmentForm)
+  const [workorderForm, setWorkorderForm] = useState(emptyWorkorderForm)
+  const [workorderPartForm, setWorkorderPartForm] = useState(emptyWorkorderPartForm)
+  const [selectedWorkorderId, setSelectedWorkorderId] = useState('')
   const [currentUser, setCurrentUser] = useState(() => {
     const saved = localStorage.getItem('inventory:currentUser')
     return saved ? JSON.parse(saved) : null
@@ -118,24 +155,40 @@ export default function App() {
   }
 
   const loadAll = useCallback(async () => {
-    const [p, l, c, t, u, a, m] = await Promise.all([
+    const [p, l, c, t, u, a, m, customersRes, equipmentRes, workordersRes] = await Promise.all([
       fetch(`${API}/parts`),
       fetch(`${API}/locations`),
       fetch(`${API}/categories`),
       fetch(`${API}/transactions`),
       fetch(`${API}/users`),
       fetch(`${API}/audit`),
-      fetch(`${API}/stock-movements`)
+      fetch(`${API}/stock-movements`),
+      fetch(`${API}/customers`),
+      fetch(`${API}/equipment`),
+      fetch(`${API}/workorders`)
     ])
 
-    setParts(await p.json())
+    const nextParts = await p.json()
+    const nextWorkorders = await workordersRes.json()
+    const activeWorkorderId = selectedWorkorderId || nextWorkorders[0]?.id || ''
+    setParts(nextParts)
     setLocations(await l.json())
     setCategories(await c.json())
     setTransactions(await t.json())
     setUsers(await u.json())
     setAuditLogs(await a.json())
     setStockMovements(await m.json())
-  }, [API])
+    setCustomers(await customersRes.json())
+    setEquipment(await equipmentRes.json())
+    setWorkorders(nextWorkorders)
+    if (!selectedWorkorderId && activeWorkorderId) setSelectedWorkorderId(String(activeWorkorderId))
+    if (activeWorkorderId) {
+      const partsRes = await fetch(`${API}/workorders/${activeWorkorderId}/parts`)
+      setWorkorderParts(await partsRes.json())
+    } else {
+      setWorkorderParts([])
+    }
+  }, [API, selectedWorkorderId])
 
   useEffect(() => {
     Promise.resolve().then(loadAll).catch(() => {
@@ -230,6 +283,111 @@ export default function App() {
     }
     setUserForm({ name: '', role: 'tech', pin: '' })
     setStatus('User added.')
+    loadAll()
+  }
+
+  function updateForm(setter, field, value) {
+    setter((current) => ({ ...current, [field]: value }))
+  }
+
+  async function addCustomer() {
+    if (!canWrite || !customerForm.name.trim()) return
+    const res = await apiFetch(`${API}/customers`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(customerForm)
+    })
+    const data = await res.json()
+    if (!res.ok) {
+      setStatus(data.error || 'Failed to add customer.')
+      return
+    }
+    setCustomerForm(emptyCustomerForm)
+    setStatus('Customer added.')
+    loadAll()
+  }
+
+  async function addEquipment() {
+    if (!canWrite || !equipmentForm.name.trim()) return
+    const res = await apiFetch(`${API}/equipment`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...equipmentForm,
+        customerId: equipmentForm.customerId ? Number(equipmentForm.customerId) : null
+      })
+    })
+    const data = await res.json()
+    if (!res.ok) {
+      setStatus(data.error || 'Failed to add equipment.')
+      return
+    }
+    setEquipmentForm(emptyEquipmentForm)
+    setStatus('Equipment added.')
+    loadAll()
+  }
+
+  async function saveWorkorder() {
+    if (!canWrite || !workorderForm.title.trim()) return
+    const res = await apiFetch(`${API}/workorders`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...workorderForm,
+        customerId: workorderForm.customerId ? Number(workorderForm.customerId) : null,
+        equipmentId: workorderForm.equipmentId ? Number(workorderForm.equipmentId) : null,
+        laborHours: Number(workorderForm.laborHours) || 0,
+        laborRate: Number(workorderForm.laborRate) || 0
+      })
+    })
+    const data = await res.json()
+    if (!res.ok) {
+      setStatus(data.error || 'Failed to add workorder.')
+      return
+    }
+    setSelectedWorkorderId(String(data.id))
+    setWorkorderPartForm((current) => ({ ...current, workorderId: String(data.id) }))
+    setWorkorderForm(emptyWorkorderForm)
+    setStatus(`Workorder ${data.number} added.`)
+    loadAll()
+  }
+
+  async function addWorkorderPart() {
+    if (!canWrite) return
+    const workorderId = workorderPartForm.workorderId || selectedWorkorderId
+    if (!workorderId || !workorderPartForm.partId) {
+      setStatus('Choose a workorder and part first.')
+      return
+    }
+    const res = await apiFetch(`${API}/workorders/${workorderId}/parts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...workorderPartForm,
+        partId: Number(workorderPartForm.partId),
+        qty: Number(workorderPartForm.qty) || 1,
+        workorderId
+      })
+    })
+    const data = await res.json()
+    if (!res.ok) {
+      setStatus(data.error || 'Failed to add part to workorder.')
+      return
+    }
+    setSelectedWorkorderId(String(workorderId))
+    setWorkorderPartForm({ ...emptyWorkorderPartForm, workorderId: String(workorderId) })
+    setStatus(workorderPartForm.mode === 'use' ? `Used ${data.actualUsed} on workorder.` : 'Part reserved for workorder.')
+    loadAll()
+  }
+
+  async function removeReservedWorkorderPart(id) {
+    const res = await apiFetch(`${API}/workorder-parts/${id}`, { method: 'DELETE' })
+    const data = await res.json()
+    if (!res.ok) {
+      setStatus(data.error || 'Failed to remove reserved part.')
+      return
+    }
+    setStatus('Reserved part removed.')
     loadAll()
   }
 
@@ -432,6 +590,24 @@ export default function App() {
 
   const locMap = useMemo(() => buildMap(locations), [locations])
   const catMap = useMemo(() => buildMap(categories), [categories])
+  const customerMap = useMemo(() => buildMap(customers), [customers])
+  const equipmentMap = useMemo(() => buildMap(equipment), [equipment])
+  const selectedWorkorder = useMemo(
+    () => workorders.find((workorder) => String(workorder.id) === String(selectedWorkorderId)),
+    [workorders, selectedWorkorderId]
+  )
+  const selectedWorkorderTotals = useMemo(() => {
+    const partsCost = workorderParts.reduce((total, item) => total + Number(item.qtyUsed || 0) * Number(item.unitCost || 0), 0)
+    const partsRetail = workorderParts.reduce((total, item) => total + Number(item.qtyUsed || 0) * Number(item.retailPrice || 0), 0)
+    const labor = Number(selectedWorkorder?.laborHours || 0) * Number(selectedWorkorder?.laborRate || 0)
+    return {
+      partsCost,
+      partsRetail,
+      labor,
+      total: partsRetail + labor,
+      margin: partsRetail - partsCost
+    }
+  }, [workorderParts, selectedWorkorder])
 
   function getPath(id, mapObj) {
     if (!id) return 'None'
@@ -1067,6 +1243,214 @@ export default function App() {
         </section>
       )}
 
+      <section className="workorder-panel">
+        <div className="panel-title-row">
+          <div>
+            <h2>Workorders</h2>
+            <p>Build jobs, reserve parts, use parts, and draft invoice totals.</p>
+          </div>
+          <strong>{workorders.filter((workorder) => workorder.status !== 'complete' && workorder.status !== 'invoiced').length} open</strong>
+        </div>
+
+        <div className="workorder-layout">
+          <div className="panel">
+            <h3>Add Customer</h3>
+            <div className="mini-form stack-form">
+              <input placeholder="Customer name" value={customerForm.name} onChange={(e) => updateForm(setCustomerForm, 'name', e.target.value)} />
+              <input placeholder="Phone" value={customerForm.phone} onChange={(e) => updateForm(setCustomerForm, 'phone', e.target.value)} />
+              <input placeholder="Email" value={customerForm.email} onChange={(e) => updateForm(setCustomerForm, 'email', e.target.value)} />
+              <input placeholder="Notes" value={customerForm.notes} onChange={(e) => updateForm(setCustomerForm, 'notes', e.target.value)} />
+              <button onClick={addCustomer} disabled={!canWrite}>Add Customer</button>
+            </div>
+            <div className="compact-list">
+              {customers.slice(0, 4).map((customer) => (
+                <div key={customer.id}>
+                  <span><strong>{customer.name}</strong> {customer.phone && `- ${customer.phone}`}</span>
+                </div>
+              ))}
+              {customers.length === 0 && <div className="empty-state">No customers yet.</div>}
+            </div>
+          </div>
+
+          <div className="panel">
+            <h3>Add Vehicle / Equipment</h3>
+            <div className="mini-form stack-form">
+              <select value={equipmentForm.customerId} onChange={(e) => updateForm(setEquipmentForm, 'customerId', e.target.value)}>
+                <option value="">No Customer</option>
+                {customers.map((customer) => (
+                  <option key={customer.id} value={customer.id}>{customer.name}</option>
+                ))}
+              </select>
+              <input placeholder="Name or unit" value={equipmentForm.name} onChange={(e) => updateForm(setEquipmentForm, 'name', e.target.value)} />
+              <input placeholder="Year / make / model" value={[equipmentForm.year, equipmentForm.make, equipmentForm.model].filter(Boolean).join(' ')} onChange={(e) => {
+                const [year = '', make = '', ...model] = e.target.value.split(' ')
+                setEquipmentForm((current) => ({ ...current, year, make, model: model.join(' ') }))
+              }} />
+              <input placeholder="VIN / serial" value={equipmentForm.vin || equipmentForm.serial} onChange={(e) => updateForm(setEquipmentForm, 'vin', e.target.value)} />
+              <button onClick={addEquipment} disabled={!canWrite}>Add Equipment</button>
+            </div>
+            <div className="compact-list">
+              {equipment.slice(0, 4).map((item) => (
+                <div key={item.id}>
+                  <span><strong>{item.name}</strong> {item.customerName && `- ${item.customerName}`}</span>
+                </div>
+              ))}
+              {equipment.length === 0 && <div className="empty-state">No equipment yet.</div>}
+            </div>
+          </div>
+
+          <div className="panel wide-panel">
+            <h3>Add Workorder</h3>
+            <div className="field-grid">
+              <label>
+                Number
+                <input placeholder="Auto if blank" value={workorderForm.number} onChange={(e) => updateForm(setWorkorderForm, 'number', e.target.value)} />
+              </label>
+              <label>
+                Title
+                <input value={workorderForm.title} onChange={(e) => updateForm(setWorkorderForm, 'title', e.target.value)} />
+              </label>
+              <label>
+                Status
+                <select value={workorderForm.status} onChange={(e) => updateForm(setWorkorderForm, 'status', e.target.value)}>
+                  <option value="open">Open</option>
+                  <option value="in progress">In Progress</option>
+                  <option value="waiting parts">Waiting Parts</option>
+                  <option value="complete">Complete</option>
+                  <option value="invoiced">Invoiced</option>
+                </select>
+              </label>
+              <label>
+                Customer
+                <select value={workorderForm.customerId} onChange={(e) => updateForm(setWorkorderForm, 'customerId', e.target.value)}>
+                  <option value="">No Customer</option>
+                  {customers.map((customer) => (
+                    <option key={customer.id} value={customer.id}>{customer.name}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Equipment
+                <select value={workorderForm.equipmentId} onChange={(e) => updateForm(setWorkorderForm, 'equipmentId', e.target.value)}>
+                  <option value="">No Equipment</option>
+                  {equipment
+                    .filter((item) => !workorderForm.customerId || String(item.customerId) === String(workorderForm.customerId))
+                    .map((item) => (
+                      <option key={item.id} value={item.id}>{item.name}</option>
+                    ))}
+                </select>
+              </label>
+              <label>
+                Labor hours
+                <input type="number" min="0" step="0.1" value={workorderForm.laborHours} onChange={(e) => updateForm(setWorkorderForm, 'laborHours', e.target.value)} />
+              </label>
+              <label>
+                Labor rate
+                <input type="number" min="0" step="0.01" value={workorderForm.laborRate} onChange={(e) => updateForm(setWorkorderForm, 'laborRate', e.target.value)} />
+              </label>
+              <label className="full-field">
+                Complaint
+                <input value={workorderForm.complaint} onChange={(e) => updateForm(setWorkorderForm, 'complaint', e.target.value)} />
+              </label>
+              <label className="full-field">
+                Diagnosis / labor notes
+                <textarea value={workorderForm.diagnosis} onChange={(e) => updateForm(setWorkorderForm, 'diagnosis', e.target.value)} />
+              </label>
+            </div>
+            <button className="primary-action" onClick={saveWorkorder} disabled={!canWrite}>Add Workorder</button>
+          </div>
+        </div>
+
+        <div className="workorder-detail">
+          <div className="panel">
+            <h3>Open Jobs</h3>
+            <div className="compact-list">
+              {workorders.slice(0, 8).map((workorder) => (
+                <button
+                  key={workorder.id}
+                  className={String(selectedWorkorderId) === String(workorder.id) ? 'selected-row' : ''}
+                  onClick={() => {
+                    setSelectedWorkorderId(String(workorder.id))
+                    setWorkorderPartForm((current) => ({ ...current, workorderId: String(workorder.id) }))
+                  }}
+                >
+                  {workorder.number} - {workorder.title} ({workorder.status})
+                </button>
+              ))}
+              {workorders.length === 0 && <div className="empty-state">No workorders yet.</div>}
+            </div>
+          </div>
+
+          <div className="panel wide-panel">
+            <div className="panel-title-row">
+              <h3>{selectedWorkorder ? `${selectedWorkorder.number} - ${selectedWorkorder.title}` : 'Workorder Detail'}</h3>
+              {selectedWorkorder && <strong>{selectedWorkorder.status}</strong>}
+            </div>
+            {selectedWorkorder ? (
+              <>
+                <div className="part-meta">
+                  <span>Customer: {customerMap[selectedWorkorder.customerId]?.name || selectedWorkorder.customerName || 'None'}</span>
+                  <span>Equipment: {equipmentMap[selectedWorkorder.equipmentId]?.name || selectedWorkorder.equipmentName || 'None'}</span>
+                  <span>Parts retail: ${selectedWorkorderTotals.partsRetail.toFixed(2)}</span>
+                  <span>Labor: ${selectedWorkorderTotals.labor.toFixed(2)}</span>
+                  <span>Total draft: ${selectedWorkorderTotals.total.toFixed(2)}</span>
+                  <span>Parts margin: ${selectedWorkorderTotals.margin.toFixed(2)}</span>
+                </div>
+                <div className="mini-form workorder-part-form">
+                  <select value={workorderPartForm.partId} onChange={(e) => updateForm(setWorkorderPartForm, 'partId', e.target.value)}>
+                    <option value="">Choose Part</option>
+                    {parts.map((part) => (
+                      <option key={part.id} value={part.id}>
+                        {part.name} - avail {part.availableQty ?? part.quantity}
+                      </option>
+                    ))}
+                  </select>
+                  <input type="number" min="1" value={workorderPartForm.qty} onChange={(e) => updateForm(setWorkorderPartForm, 'qty', e.target.value)} />
+                  <select value={workorderPartForm.mode} onChange={(e) => updateForm(setWorkorderPartForm, 'mode', e.target.value)}>
+                    <option value="reserve">Reserve</option>
+                    <option value="use">Use Now</option>
+                  </select>
+                  <input placeholder="Note" value={workorderPartForm.note} onChange={(e) => updateForm(setWorkorderPartForm, 'note', e.target.value)} />
+                  <button onClick={addWorkorderPart} disabled={!canWrite}>Add Part</button>
+                </div>
+                <div className="compact-list">
+                  {workorderParts.map((item) => (
+                    <div key={item.id}>
+                      <span>
+                        <strong>{item.partName}</strong> - reserved {item.qtyReserved}, used {item.qtyUsed}
+                      </span>
+                      <span>${(Number(item.qtyUsed || 0) * Number(item.retailPrice || 0)).toFixed(2)}</span>
+                      {Number(item.qtyUsed || 0) === 0 && (
+                        <button className="danger-button" onClick={() => removeReservedWorkorderPart(item.id)} disabled={!canWrite}>Remove</button>
+                      )}
+                    </div>
+                  ))}
+                  {workorderParts.length === 0 && <div className="empty-state">No parts on this workorder yet.</div>}
+                </div>
+              </>
+            ) : (
+              <div className="empty-state">Select or create a workorder.</div>
+            )}
+          </div>
+
+          <div className="panel invoice-draft">
+            <h3>Invoice Draft</h3>
+            {selectedWorkorder ? (
+              <>
+                <p><strong>{selectedWorkorder.number}</strong></p>
+                <p>{customerMap[selectedWorkorder.customerId]?.name || selectedWorkorder.customerName || 'No customer'}</p>
+                <p>{equipmentMap[selectedWorkorder.equipmentId]?.name || selectedWorkorder.equipmentName || 'No equipment'}</p>
+                <div className="invoice-line"><span>Parts</span><strong>${selectedWorkorderTotals.partsRetail.toFixed(2)}</strong></div>
+                <div className="invoice-line"><span>Labor</span><strong>${selectedWorkorderTotals.labor.toFixed(2)}</strong></div>
+                <div className="invoice-total"><span>Total</span><strong>${selectedWorkorderTotals.total.toFixed(2)}</strong></div>
+              </>
+            ) : (
+              <div className="empty-state">No workorder selected.</div>
+            )}
+          </div>
+        </div>
+      </section>
+
       <section className="forms-grid" aria-label="Add inventory records">
         <div className="panel wide-panel">
           <div className="panel-title-row">
@@ -1359,6 +1743,8 @@ export default function App() {
                 )}
                 <div className="part-meta">
                   <span>Qty: {p.quantity}</span>
+                  <span>Available: {p.availableQty ?? p.quantity}</span>
+                  <span>Reserved: {p.reservedQty || 0}</span>
                   <span>Reorder: {p.reorderThreshold || 0}</span>
                   <span>Barcode: {p.barcode || 'None'}</span>
                   <span>Code: {p.internalCode || 'None'}</span>

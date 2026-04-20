@@ -83,3 +83,57 @@ CREATE TABLE IF NOT EXISTS stock_movements (
   unitCost REAL DEFAULT 0,
   timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS customers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  phone TEXT,
+  email TEXT,
+  notes TEXT,
+  createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS equipment (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  customerId INTEGER,
+  name TEXT NOT NULL,
+  year TEXT,
+  make TEXT,
+  model TEXT,
+  vin TEXT,
+  serial TEXT,
+  unitNumber TEXT,
+  mileage TEXT,
+  hours TEXT,
+  notes TEXT,
+  createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS workorders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  number TEXT NOT NULL,
+  title TEXT NOT NULL,
+  status TEXT DEFAULT 'open',
+  customerId INTEGER,
+  equipmentId INTEGER,
+  complaint TEXT,
+  diagnosis TEXT,
+  laborNotes TEXT,
+  laborHours REAL DEFAULT 0,
+  laborRate REAL DEFAULT 0,
+  createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS workorder_parts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  workorderId INTEGER NOT NULL,
+  partId INTEGER NOT NULL,
+  qtyReserved INTEGER DEFAULT 0,
+  qtyUsed INTEGER DEFAULT 0,
+  unitCost REAL DEFAULT 0,
+  retailPrice REAL DEFAULT 0,
+  note TEXT,
+  createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+);

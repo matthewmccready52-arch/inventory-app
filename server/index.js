@@ -135,6 +135,60 @@ function createSystemTables() {
       unitCost REAL DEFAULT 0,
       timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )`, [], seedDefaultUsers);
+
+    db.run(`CREATE TABLE IF NOT EXISTS customers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      phone TEXT,
+      email TEXT,
+      notes TEXT,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
+
+    db.run(`CREATE TABLE IF NOT EXISTS equipment (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      customerId INTEGER,
+      name TEXT NOT NULL,
+      year TEXT,
+      make TEXT,
+      model TEXT,
+      vin TEXT,
+      serial TEXT,
+      unitNumber TEXT,
+      mileage TEXT,
+      hours TEXT,
+      notes TEXT,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
+
+    db.run(`CREATE TABLE IF NOT EXISTS workorders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      number TEXT NOT NULL,
+      title TEXT NOT NULL,
+      status TEXT DEFAULT 'open',
+      customerId INTEGER,
+      equipmentId INTEGER,
+      complaint TEXT,
+      diagnosis TEXT,
+      laborNotes TEXT,
+      laborHours REAL DEFAULT 0,
+      laborRate REAL DEFAULT 0,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
+
+    db.run(`CREATE TABLE IF NOT EXISTS workorder_parts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      workorderId INTEGER NOT NULL,
+      partId INTEGER NOT NULL,
+      qtyReserved INTEGER DEFAULT 0,
+      qtyUsed INTEGER DEFAULT 0,
+      unitCost REAL DEFAULT 0,
+      retailPrice REAL DEFAULT 0,
+      note TEXT,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
   });
 }
 
@@ -413,15 +467,353 @@ app.get('/api/stock-movements', (req, res) => {
   );
 });
 
+// CUSTOMERS / EQUIPMENT / WORKORDERS
+app.get('/api/customers', (req, res) => {
+  db.all('SELECT * FROM customers ORDER BY name ASC', [], (err, rows) => {
+    if (err) {
+      console.error(err);
+      return res.status(500).json({ error: 'Failed to load customers' });
+    }
+    res.json(rows);
+  });
+});
+
+app.post('/api/customers', requireRole('owner', 'tech'), (req, res) => {
+  const name = String(req.body.name || '').trim();
+  const phone = String(req.body.phone || '').trim();
+  const email = String(req.body.email || '').trim();
+  const notes = String(req.body.notes || '').trim();
+
+  if (!name) return res.status(400).json({ error: 'Customer name required' });
+
+  db.run(
+    'INSERT INTO customers (name, phone, email, notes) VALUES (?, ?, ?, ?)',
+    [name, phone, email, notes],
+    function (err) {
+      if (err) {
+        console.error(err);
+        return res.status(500).json({ error: 'Failed to add customer' });
+      }
+      writeAudit(req, 'create', 'customer', this.lastID, { name });
+      res.json({ success: true, id: this.lastID });
+    }
+  );
+});
+
+app.put('/api/customers/:id', requireRole('owner', 'tech'), (req, res) => {
+  const id = req.params.id;
+  const name = String(req.body.name || '').trim();
+  const phone = String(req.body.phone || '').trim();
+  const email = String(req.body.email || '').trim();
+  const notes = String(req.body.notes || '').trim();
+
+  if (!name) return res.status(400).json({ error: 'Customer name required' });
+
+  db.run(
+    'UPDATE customers SET name = ?, phone = ?, email = ?, notes = ? WHERE id = ?',
+    [name, phone, email, notes, id],
+    function (err) {
+      if (err) {
+        console.error(err);
+        return res.status(500).json({ error: 'Failed to update customer' });
+      }
+      writeAudit(req, 'update', 'customer', id, { name });
+      res.json({ success: true, updated: this.changes });
+    }
+  );
+});
+
+app.get('/api/equipment', (req, res) => {
+  db.all(
+    `SELECT e.*, c.name AS customerName
+     FROM equipment e
+     LEFT JOIN customers c ON c.id = e.customerId
+     ORDER BY e.name ASC`,
+    [],
+    (err, rows) => {
+      if (err) {
+        console.error(err);
+        return res.status(500).json({ error: 'Failed to load equipment' });
+      }
+      res.json(rows);
+    }
+  );
+});
+
+app.post('/api/equipment', requireRole('owner', 'tech'), (req, res) => {
+  const fields = {
+    customerId: req.body.customerId ? Number(req.body.customerId) : null,
+    name: String(req.body.name || '').trim(),
+    year: String(req.body.year || '').trim(),
+    make: String(req.body.make || '').trim(),
+    model: String(req.body.model || '').trim(),
+    vin: String(req.body.vin || '').trim(),
+    serial: String(req.body.serial || '').trim(),
+    unitNumber: String(req.body.unitNumber || '').trim(),
+    mileage: String(req.body.mileage || '').trim(),
+    hours: String(req.body.hours || '').trim(),
+    notes: String(req.body.notes || '').trim()
+  };
+
+  if (!fields.name) return res.status(400).json({ error: 'Equipment name required' });
+
+  db.run(
+    `INSERT INTO equipment (
+      customerId, name, year, make, model, vin, serial, unitNumber, mileage, hours, notes
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    Object.values(fields),
+    function (err) {
+      if (err) {
+        console.error(err);
+        return res.status(500).json({ error: 'Failed to add equipment' });
+      }
+      writeAudit(req, 'create', 'equipment', this.lastID, { name: fields.name });
+      res.json({ success: true, id: this.lastID });
+    }
+  );
+});
+
+app.get('/api/workorders', (req, res) => {
+  db.all(
+    `SELECT w.*, c.name AS customerName, e.name AS equipmentName,
+      COALESCE(parts.partsCost, 0) AS partsCost,
+      COALESCE(parts.partsRetail, 0) AS partsRetail,
+      COALESCE(parts.reservedCount, 0) AS reservedCount,
+      COALESCE(parts.usedCount, 0) AS usedCount
+     FROM workorders w
+     LEFT JOIN customers c ON c.id = w.customerId
+     LEFT JOIN equipment e ON e.id = w.equipmentId
+     LEFT JOIN (
+       SELECT workorderId,
+        SUM(qtyUsed * unitCost) AS partsCost,
+        SUM(qtyUsed * retailPrice) AS partsRetail,
+        SUM(qtyReserved) AS reservedCount,
+        SUM(qtyUsed) AS usedCount
+       FROM workorder_parts
+       GROUP BY workorderId
+     ) parts ON parts.workorderId = w.id
+     ORDER BY w.updatedAt DESC, w.id DESC`,
+    [],
+    (err, rows) => {
+      if (err) {
+        console.error(err);
+        return res.status(500).json({ error: 'Failed to load workorders' });
+      }
+      res.json(rows);
+    }
+  );
+});
+
+app.get('/api/workorders/:id/parts', (req, res) => {
+  db.all(
+    `SELECT wp.*, p.name AS partName, p.partNumber, p.quantity, p.unit
+     FROM workorder_parts wp
+     LEFT JOIN parts p ON p.id = wp.partId
+     WHERE wp.workorderId = ?
+     ORDER BY wp.updatedAt DESC, wp.id DESC`,
+    [req.params.id],
+    (err, rows) => {
+      if (err) {
+        console.error(err);
+        return res.status(500).json({ error: 'Failed to load workorder parts' });
+      }
+      res.json(rows);
+    }
+  );
+});
+
+app.post('/api/workorders', requireRole('owner', 'tech'), (req, res) => {
+  const title = String(req.body.title || '').trim();
+  const number = String(req.body.number || `WO-${Date.now().toString().slice(-6)}`).trim();
+  const status = String(req.body.status || 'open').trim();
+  const customerId = req.body.customerId ? Number(req.body.customerId) : null;
+  const equipmentId = req.body.equipmentId ? Number(req.body.equipmentId) : null;
+  const complaint = String(req.body.complaint || '').trim();
+  const diagnosis = String(req.body.diagnosis || '').trim();
+  const laborNotes = String(req.body.laborNotes || '').trim();
+  const laborHours = Number(req.body.laborHours) || 0;
+  const laborRate = Number(req.body.laborRate) || 0;
+
+  if (!title) return res.status(400).json({ error: 'Workorder title required' });
+
+  db.run(
+    `INSERT INTO workorders (
+      number, title, status, customerId, equipmentId, complaint, diagnosis, laborNotes, laborHours, laborRate
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [number, title, status, customerId, equipmentId, complaint, diagnosis, laborNotes, laborHours, laborRate],
+    function (err) {
+      if (err) {
+        console.error(err);
+        return res.status(500).json({ error: 'Failed to add workorder' });
+      }
+      writeAudit(req, 'create', 'workorder', this.lastID, { number, title });
+      res.json({ success: true, id: this.lastID, number });
+    }
+  );
+});
+
+app.put('/api/workorders/:id', requireRole('owner', 'tech'), (req, res) => {
+  const id = req.params.id;
+  const title = String(req.body.title || '').trim();
+  const number = String(req.body.number || '').trim();
+  const status = String(req.body.status || 'open').trim();
+  const customerId = req.body.customerId ? Number(req.body.customerId) : null;
+  const equipmentId = req.body.equipmentId ? Number(req.body.equipmentId) : null;
+  const complaint = String(req.body.complaint || '').trim();
+  const diagnosis = String(req.body.diagnosis || '').trim();
+  const laborNotes = String(req.body.laborNotes || '').trim();
+  const laborHours = Number(req.body.laborHours) || 0;
+  const laborRate = Number(req.body.laborRate) || 0;
+
+  if (!title || !number) return res.status(400).json({ error: 'Workorder number and title required' });
+
+  db.run(
+    `UPDATE workorders SET
+      number = ?, title = ?, status = ?, customerId = ?, equipmentId = ?,
+      complaint = ?, diagnosis = ?, laborNotes = ?, laborHours = ?, laborRate = ?,
+      updatedAt = CURRENT_TIMESTAMP
+     WHERE id = ?`,
+    [number, title, status, customerId, equipmentId, complaint, diagnosis, laborNotes, laborHours, laborRate, id],
+    function (err) {
+      if (err) {
+        console.error(err);
+        return res.status(500).json({ error: 'Failed to update workorder' });
+      }
+      writeAudit(req, 'update', 'workorder', id, { number, status });
+      res.json({ success: true, updated: this.changes });
+    }
+  );
+});
+
+app.post('/api/workorders/:id/parts', requireRole('owner', 'tech'), (req, res) => {
+  const workorderId = req.params.id;
+  const partId = Number(req.body.partId);
+  const qty = Number(req.body.qty || 1);
+  const mode = req.body.mode === 'use' ? 'use' : 'reserve';
+  const note = String(req.body.note || '').trim();
+
+  if (!partId || !Number.isFinite(qty) || qty <= 0) {
+    return res.status(400).json({ error: 'Part and quantity required' });
+  }
+
+  db.get('SELECT * FROM parts WHERE id = ?', [partId], (partErr, part) => {
+    if (partErr || !part) return res.status(404).json({ error: 'Part not found' });
+
+    db.get('SELECT * FROM workorders WHERE id = ?', [workorderId], (woErr, workorder) => {
+      if (woErr || !workorder) return res.status(404).json({ error: 'Workorder not found' });
+
+      const qtyUsed = mode === 'use' ? qty : 0;
+      const qtyReserved = mode === 'reserve' ? qty : qty;
+      const newQty = Math.max(0, Number(part.quantity || 0) - qtyUsed);
+      const actualUsed = Number(part.quantity || 0) - newQty;
+
+      db.serialize(() => {
+        db.run('BEGIN TRANSACTION');
+
+        if (qtyUsed > 0) {
+          db.run('UPDATE parts SET quantity = ? WHERE id = ?', [newQty, partId]);
+        }
+
+        db.run(
+          `INSERT INTO workorder_parts (
+            workorderId, partId, qtyReserved, qtyUsed, unitCost, retailPrice, note
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [workorderId, partId, qtyReserved, actualUsed, part.unitCost || 0, part.retailPrice || 0, note],
+          function (insertErr) {
+            if (insertErr) {
+              console.error(insertErr);
+              db.run('ROLLBACK');
+              return res.status(500).json({ error: 'Failed to add workorder part' });
+            }
+
+            db.run('UPDATE workorders SET updatedAt = CURRENT_TIMESTAMP WHERE id = ?', [workorderId]);
+
+            if (actualUsed > 0) {
+              db.run(
+                `INSERT INTO transactions (
+                  partId, type, qtyChange, note, workorderRef, customerRef, equipmentRef, unitCost
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                [
+                  partId,
+                  'workorder-use',
+                  -actualUsed,
+                  note,
+                  workorder.number,
+                  workorder.customerId || '',
+                  workorder.equipmentId || '',
+                  part.unitCost || 0
+                ]
+              );
+              writeStockMovement(req, partId, 'workorder-use', -actualUsed, newQty, {
+                reason: note || `Used on ${workorder.number}`,
+                workorderRef: workorder.number,
+                customerRef: workorder.customerId || '',
+                equipmentRef: workorder.equipmentId || '',
+                unitCost: part.unitCost || 0
+              });
+            }
+
+            db.run('COMMIT', (commitErr) => {
+              if (commitErr) {
+                console.error(commitErr);
+                return res.status(500).json({ error: 'Failed to finish workorder part update' });
+              }
+              writeAudit(req, mode === 'use' ? 'use-part' : 'reserve-part', 'workorder', workorderId, {
+                partId,
+                qty,
+                actualUsed
+              });
+              res.json({ success: true, id: this.lastID, actualUsed });
+            });
+          }
+        );
+      });
+    });
+  });
+});
+
+app.delete('/api/workorder-parts/:id', requireRole('owner', 'tech'), (req, res) => {
+  const id = req.params.id;
+
+  db.get('SELECT * FROM workorder_parts WHERE id = ?', [id], (err, row) => {
+    if (err || !row) return res.status(404).json({ error: 'Workorder part not found' });
+    if (Number(row.qtyUsed) > 0) {
+      return res.status(400).json({ error: 'Used parts stay on the workorder history. Add a return instead.' });
+    }
+
+    db.run('DELETE FROM workorder_parts WHERE id = ?', [id], function (deleteErr) {
+      if (deleteErr) {
+        console.error(deleteErr);
+        return res.status(500).json({ error: 'Failed to remove reserved part' });
+      }
+      writeAudit(req, 'remove-reserved-part', 'workorder', row.workorderId, { workorderPartId: id });
+      res.json({ success: true, deleted: this.changes });
+    });
+  });
+});
+
 // PARTS
 app.get('/api/parts', (req, res) => {
-  db.all('SELECT * FROM parts ORDER BY name ASC', [], (err, rows) => {
+  db.all(
+    `SELECT p.*,
+      COALESCE(r.reservedQty, 0) AS reservedQty,
+      p.quantity - COALESCE(r.reservedQty, 0) AS availableQty
+     FROM parts p
+     LEFT JOIN (
+       SELECT partId, SUM(MAX(qtyReserved - qtyUsed, 0)) AS reservedQty
+       FROM workorder_parts
+       GROUP BY partId
+     ) r ON r.partId = p.id
+     ORDER BY p.name ASC`,
+    [],
+    (err, rows) => {
     if (err) {
       console.error(err);
       return res.status(500).json({ error: 'Failed to load parts' });
     }
     res.json(rows);
-  });
+    }
+  );
 });
 
 app.get('/api/parts/export', (req, res) => {
