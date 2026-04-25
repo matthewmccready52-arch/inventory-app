@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Workorders</string>
+    <string name="title_activity_main">Workorders</string>
+    <string name="package_name">com.matthewmccready.workorders</string>
+    <string name="custom_url_scheme">com.matthewmccready.workorders</string>
+</resources>
