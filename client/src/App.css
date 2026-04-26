@@ -192,11 +192,70 @@ textarea {
   grid-template-columns: 1fr auto;
 }
 
+.session-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
 .login-form {
   align-items: end;
   display: grid;
   gap: 12px;
   grid-template-columns: 1fr minmax(140px, 190px) minmax(120px, 160px) auto;
+}
+
+.ops-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.mode-summary {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+}
+
+.mode-summary span {
+  color: var(--muted);
+}
+
+.sr-only-input {
+  height: 0;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+  position: absolute;
+  width: 0;
+}
+
+.lock-overlay {
+  align-items: center;
+  background: rgba(10, 13, 16, 0.82);
+  backdrop-filter: blur(10px);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 20px;
+  position: fixed;
+  z-index: 30;
+}
+
+.lock-panel {
+  background: linear-gradient(180deg, var(--surface-raised), var(--surface));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  display: grid;
+  gap: 12px;
+  max-width: 420px;
+  padding: 20px;
+  width: min(100%, 420px);
 }
 
 .admin-grid {
@@ -700,6 +759,7 @@ textarea {
   .stats-grid,
   .field-grid,
   .intake-photo-row,
+  .ops-grid,
   .part-meta,
   .scan-form,
   .server-setting,
@@ -707,6 +767,10 @@ textarea {
   .count-controls,
   .stock-controls {
     grid-template-columns: 1fr;
+  }
+
+  .session-actions {
+    justify-content: stretch;
   }
 
   .full-field {
