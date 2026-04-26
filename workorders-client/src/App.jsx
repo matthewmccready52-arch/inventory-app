@@ -421,7 +421,6 @@ function nowIso() {
 function buildWorkorderHtml(workorder, customer, machine, partRows, settings, originLabel = 'Local device storage') {
   const business = normalizeBusinessSettings(settings)
   const partsRetail = partRows.reduce((sum, row) => sum + Number(row.qtyUsed || 0) * Number(row.retailPrice || 0), 0)
-  const partsCost = partRows.reduce((sum, row) => sum + Number(row.qtyUsed || 0) * Number(row.unitCost || 0), 0)
   const billedLaborHours = Math.max(Number(workorder.laborHours || 0), computeLaborMs(workorder) / 3600000)
   const laborTotal = billedLaborHours * Number(workorder.laborRate || 0)
   const subtotal = partsRetail + laborTotal
@@ -455,11 +454,11 @@ function buildWorkorderHtml(workorder, customer, machine, partRows, settings, or
     : '<div class="line">Customer Signature</div>'
 
   const approvalRows = [
-    ['Approval', workorder.approvalStatus || 'pending'],
+    ['Estimate Status', workorder.approvalStatus || 'pending'],
     ['Approved By', workorder.approvedBy || ''],
-    ['Method', workorder.approvalMethod || ''],
+    ['Approval Method', workorder.approvalMethod || ''],
     ['Approved At', workorder.approvedAt || ''],
-    ['Limit', workorder.approvalLimit ? formatCurrency(workorder.approvalLimit) : '']
+    ['Approval Limit', workorder.approvalLimit ? formatCurrency(workorder.approvalLimit) : '']
   ].filter(([, value]) => value)
 
   const headerContact = [business.phone, business.email].filter(Boolean).join(' | ')
@@ -476,6 +475,7 @@ function buildWorkorderHtml(workorder, customer, machine, partRows, settings, or
     h1 { font-size: 28px; }
     h2 { border-bottom: 1px solid #bbb; font-size: 17px; margin: 24px 0 8px; padding-bottom: 4px; }
     .muted { color: #555; }
+    .status-chip { border: 1px solid #222; border-radius: 999px; display: inline-block; font-size: 12px; font-weight: 700; padding: 4px 10px; text-transform: uppercase; }
     .grid { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .box { border: 1px solid #bbb; border-radius: 6px; padding: 10px; }
     table { border-collapse: collapse; margin-top: 8px; width: 100%; }
@@ -497,29 +497,29 @@ function buildWorkorderHtml(workorder, customer, machine, partRows, settings, or
 <body>
   <header>
     <div>
-      <h1>${htmlEscape(business.shopName || 'Work Order / Invoice Draft')}</h1>
-      ${business.shopName ? '<p class="muted">Work Order / Invoice Draft</p>' : ''}
+      <h1>${htmlEscape(business.shopName || 'Service Work Order')}</h1>
+      ${business.shopName ? '<p class="muted">Estimate and service summary</p>' : '<p class="muted">Estimate and service summary</p>'}
       ${business.address ? `<p class="muted">${htmlEscape(business.address)}</p>` : ''}
       ${headerContact ? `<p class="muted">${htmlEscape(headerContact)}</p>` : ''}
-      <p class="muted">Generated ${htmlEscape(new Date().toLocaleString())}</p>
+      <p class="muted">Prepared ${htmlEscape(new Date().toLocaleString())}</p>
       <p class="muted">${htmlEscape(originLabel)}</p>
     </div>
     <div>
       <h2>${htmlEscape(workorder.number)}</h2>
-      <p>Status: ${htmlEscape(workorder.status)}</p>
-      <p>Date In: ${htmlEscape(workorder.createdAt || '')}</p>
+      <p><span class="status-chip">${htmlEscape(workorder.status || 'open')}</span></p>
+      <p>Date received: ${htmlEscape(workorder.createdAt || '')}</p>
     </div>
   </header>
   <section class="grid">
     <div class="box">
-      <h2>Customer</h2>
+      <h2>Customer Contact</h2>
       <p><strong>${htmlEscape(customer?.name || 'No customer')}</strong></p>
       <p>${htmlEscape(customer?.phone || '')}</p>
       <p>${htmlEscape(customer?.email || '')}</p>
       <p>${htmlEscape(customer?.notes || '')}</p>
     </div>
     <div class="box">
-      <h2>Machine</h2>
+      <h2>Machine Details</h2>
       <p><strong>${htmlEscape(machine?.name || 'No equipment')}</strong></p>
       <p>${htmlEscape([machine?.year, machine?.make, machine?.model].filter(Boolean).join(' '))}</p>
       <p>Fleet/Unit: ${htmlEscape(machine?.unitNumber || '')}</p>
@@ -528,35 +528,34 @@ function buildWorkorderHtml(workorder, customer, machine, partRows, settings, or
       <p>Hours/Mileage: ${htmlEscape([machine?.hours, machine?.mileage].filter(Boolean).join(' / '))}</p>
     </div>
   </section>
-  <h2>Drop-Off / Complaint</h2>
-  <div class="box">${htmlEscape(workorder.complaint || '').replace(/\n/g, '<br>') || 'No complaint recorded.'}</div>
-  <h2>Quote / Authorization</h2>
+  <h2>Service Intake</h2>
+  <div class="box">${htmlEscape(workorder.complaint || '').replace(/\n/g, '<br>') || 'No customer concern recorded.'}</div>
+  <h2>Estimate Approval</h2>
   <div class="box">
-    ${workorder.estimateNotes ? `<p>${htmlEscape(workorder.estimateNotes).replace(/\n/g, '<br>')}</p>` : '<p>No quote notes recorded.</p>'}
+    ${workorder.estimateNotes ? `<p>${htmlEscape(workorder.estimateNotes).replace(/\n/g, '<br>')}</p>` : '<p>No estimate notes recorded.</p>'}
     ${approvalRows.length ? `<table><tbody>${approvalRows.map(([label, value]) => `<tr><th>${htmlEscape(label)}</th><td>${htmlEscape(value)}</td></tr>`).join('')}</tbody></table>` : ''}
     ${business.quoteTerms ? `<p class="muted">${htmlEscape(business.quoteTerms)}</p>` : ''}
   </div>
-  <h2>Diagnosis / Work Notes</h2>
-  <div class="box">${htmlEscape(workorder.diagnosis || workorder.laborNotes || '').replace(/\n/g, '<br>') || 'No notes recorded.'}</div>
+  <h2>Repair Summary</h2>
+  <div class="box">${htmlEscape(workorder.diagnosis || workorder.laborNotes || '').replace(/\n/g, '<br>') || 'No repair notes recorded.'}</div>
   ${photos ? `<h2>Machine Intake Photos</h2><div class="photos">${photos}</div>` : ''}
-  <h2>Parts Replaced / Parts Used</h2>
+  <h2>Parts Used</h2>
   <table>
-    <thead><tr><th>Qty</th><th>Part # / Code</th><th>Description</th><th class="num">Retail</th><th class="num">Line Total</th></tr></thead>
+    <thead><tr><th>Qty</th><th>Part # / Code</th><th>Description</th><th class="num">Unit Price</th><th class="num">Line Total</th></tr></thead>
     <tbody>${partsRows}</tbody>
   </table>
-  <h2>Labor / Totals</h2>
+  <h2>Charges Summary</h2>
   <div class="totals">
-    <div><span>Parts Retail</span><strong>${formatCurrency(partsRetail)}</strong></div>
+    <div><span>Parts</span><strong>${formatCurrency(partsRetail)}</strong></div>
     <div><span>Labor (${htmlEscape(billedLaborHours.toFixed(2))} hrs @ ${formatCurrency(workorder.laborRate)})</span><strong>${formatCurrency(laborTotal)}</strong></div>
     <div><span>Subtotal</span><strong>${formatCurrency(subtotal)}</strong></div>
     <div><span>Tax (${htmlEscape(String(Number(business.taxRate || 0).toFixed(2)))}%)</span><strong>${formatCurrency(taxTotal)}</strong></div>
-    <div><span>Parts Cost</span><span>${formatCurrency(partsCost)}</span></div>
-    <div class="grand"><span>Total</span><strong>${formatCurrency(grandTotal)}</strong></div>
+    <div class="grand"><span>Total Due</span><strong>${formatCurrency(grandTotal)}</strong></div>
   </div>
   ${business.invoiceFooter ? `<p class="muted">${htmlEscape(business.invoiceFooter)}</p>` : ''}
   <div class="signatures">
     ${signatureBlock}
-    <div class="line">Technician</div>
+    <div class="line">Technician Signature</div>
   </div>
 </body>
 </html>`
@@ -2063,7 +2062,7 @@ export default function App() {
         {activeTab === 'diagnose' && (
           <div className="detail-grid">
             <div className="panel wide-panel">
-              <h2>Diagnosis & Quote</h2>
+              <h2>Diagnosis & Estimate</h2>
               {selectedWorkorder ? (
                 <>
                   <div className="field-grid">
@@ -2099,7 +2098,7 @@ export default function App() {
                       </div>
                     </label>
                     <label>
-                      Approval Status
+                      Estimate Status
                       <select value={workorderForm.approvalStatus} onChange={(e) => updateForm(setWorkorderForm, 'approvalStatus', e.target.value)}>
                         <option value="pending">Pending</option>
                         <option value="approved">Approved</option>
@@ -2129,7 +2128,7 @@ export default function App() {
                       <input value={workorderForm.approvedAt} onChange={(e) => updateForm(setWorkorderForm, 'approvedAt', e.target.value)} placeholder="Auto or manual note" />
                     </label>
                     <label className="full-span">
-                      Estimate / Quote Notes
+                      Estimate Notes
                       <div className="voice-grid">
                         <textarea value={workorderForm.estimateNotes} onChange={(e) => updateForm(setWorkorderForm, 'estimateNotes', e.target.value)} />
                         <button className="dictate-button" onClick={() => captureSpeech('workorder', 'estimateNotes', setWorkorderForm)} type="button">
@@ -2148,7 +2147,7 @@ export default function App() {
                     </label>
                   </div>
                   <div className="inline-actions">
-                    <button type="button" onClick={markQuoteApprovedNow}>Mark Approved Now</button>
+                    <button type="button" onClick={markQuoteApprovedNow}>Mark Estimate Approved</button>
                     <button className="primary-action" onClick={saveWorkorder}>Save Workorder</button>
                   </div>
                 </>
@@ -2267,7 +2266,7 @@ export default function App() {
             </div>
 
             <div className="panel">
-              <h2>Work Done / Invoice</h2>
+              <h2>Repair Summary / Invoice</h2>
               {selectedWorkorder ? (
                 <>
                   <label>
@@ -2329,8 +2328,8 @@ export default function App() {
                   </div>
                   <div className="inline-actions">
                     <button className="primary-action" onClick={saveWorkorder}>Save Workorder</button>
-                    <button onClick={() => exportSelectedWorkorder(false)}>Export for Email</button>
-                    <button onClick={() => exportSelectedWorkorder(true)}>Open PDF Print View</button>
+                    <button onClick={() => exportSelectedWorkorder(false)}>Download Customer Copy</button>
+                    <button onClick={() => exportSelectedWorkorder(true)}>Open Print / PDF View</button>
                   </div>
                   {businessSettings.invoiceFooter && <p>{businessSettings.invoiceFooter}</p>}
                 </>

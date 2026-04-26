@@ -794,6 +794,13 @@ app.get('/api/workorders/:id/export', async (req, res) => {
     const billedLaborHours = Math.max(Number(workorder.laborHours || 0), trackedLaborHours);
     const laborTotal = billedLaborHours * Number(workorder.laborRate || 0);
     const grandTotal = partsRetail + laborTotal;
+    const approvalRows = [
+      ['Estimate Status', workorder.approvalStatus || 'pending'],
+      ['Approved By', workorder.approvedBy || ''],
+      ['Approval Method', workorder.approvalMethod || ''],
+      ['Approved At', workorder.approvedAt || ''],
+      ['Approval Limit', workorder.approvalLimit ? money(workorder.approvalLimit) : '']
+    ].filter(([, value]) => value);
     const origin = `${req.protocol}://${req.get('host')}`;
     const imageUrl = (src) => {
       if (!src) return '';
@@ -834,7 +841,7 @@ app.get('/api/workorders/:id/export', async (req, res) => {
 <html>
 <head>
   <meta charset="utf-8">
-  <title>${htmlEscape(workorder.number)} Workorder</title>
+    <title>${htmlEscape(workorder.number)} Workorder</title>
   <style>
     body { color: #111; font-family: Arial, sans-serif; line-height: 1.35; margin: 28px; }
     header { align-items: start; border-bottom: 3px solid #111; display: flex; justify-content: space-between; padding-bottom: 12px; }
@@ -842,6 +849,7 @@ app.get('/api/workorders/:id/export', async (req, res) => {
     h1 { font-size: 28px; }
     h2 { border-bottom: 1px solid #bbb; font-size: 17px; margin: 24px 0 8px; padding-bottom: 4px; }
     .muted { color: #555; }
+    .status-chip { border: 1px solid #222; border-radius: 999px; display: inline-block; font-size: 12px; font-weight: 700; padding: 4px 10px; text-transform: uppercase; }
     .grid { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .box { border: 1px solid #bbb; border-radius: 6px; padding: 10px; }
     table { border-collapse: collapse; margin-top: 8px; width: 100%; }
@@ -864,26 +872,27 @@ app.get('/api/workorders/:id/export', async (req, res) => {
 <body>
   <header>
     <div>
-      <h1>Work Order / Invoice Draft</h1>
-      <p class="muted">Generated ${htmlEscape(new Date().toLocaleString())}</p>
+      <h1>Service Work Order</h1>
+      <p class="muted">Estimate and service summary</p>
+      <p class="muted">Prepared ${htmlEscape(new Date().toLocaleString())}</p>
     </div>
     <div>
       <h2>${htmlEscape(workorder.number)}</h2>
-      <p>Status: ${htmlEscape(workorder.status)}</p>
-      <p>Date In: ${htmlEscape(workorder.createdAt || '')}</p>
+      <p><span class="status-chip">${htmlEscape(workorder.status || 'open')}</span></p>
+      <p>Date received: ${htmlEscape(workorder.createdAt || '')}</p>
     </div>
   </header>
 
   <section class="grid">
     <div class="box">
-      <h2>Customer</h2>
+      <h2>Customer Contact</h2>
       <p><strong>${htmlEscape(workorder.customerName || 'No customer')}</strong></p>
       <p>${htmlEscape(workorder.customerPhone || '')}</p>
       <p>${htmlEscape(workorder.customerEmail || '')}</p>
       <p>${htmlEscape(workorder.customerNotes || '')}</p>
     </div>
     <div class="box">
-      <h2>Machine</h2>
+      <h2>Machine Details</h2>
       <p><strong>${htmlEscape(workorder.equipmentName || 'No equipment')}</strong></p>
       <p>${htmlEscape([workorder.year, workorder.make, workorder.model].filter(Boolean).join(' '))}</p>
       <p>Fleet/Unit: ${htmlEscape(workorder.unitNumber || '')}</p>
@@ -893,33 +902,38 @@ app.get('/api/workorders/:id/export', async (req, res) => {
     </div>
   </section>
 
-  <h2>Drop-Off / Complaint</h2>
-  <div class="box">${htmlEscape(workorder.complaint || '').replace(/\n/g, '<br>') || 'No complaint recorded.'}</div>
+  <h2>Service Intake</h2>
+  <div class="box">${htmlEscape(workorder.complaint || '').replace(/\n/g, '<br>') || 'No customer concern recorded.'}</div>
 
-  <h2>Diagnosis / Work Notes</h2>
-  <div class="box">${htmlEscape(workorder.diagnosis || workorder.laborNotes || '').replace(/\n/g, '<br>') || 'No notes recorded.'}</div>
+  <h2>Estimate Approval</h2>
+  <div class="box">
+    ${workorder.estimateNotes ? `<p>${htmlEscape(workorder.estimateNotes).replace(/\n/g, '<br>')}</p>` : '<p>No estimate notes recorded.</p>'}
+    ${approvalRows.length ? `<table><tbody>${approvalRows.map(([label, value]) => `<tr><th>${htmlEscape(label)}</th><td>${htmlEscape(value)}</td></tr>`).join('')}</tbody></table>` : ''}
+  </div>
+
+  <h2>Repair Summary</h2>
+  <div class="box">${htmlEscape(workorder.diagnosis || workorder.laborNotes || '').replace(/\n/g, '<br>') || 'No repair notes recorded.'}</div>
 
   ${photos ? `<h2>Machine Intake Photos</h2><div class="photos">${photos}</div>` : ''}
 
-  <h2>Parts Replaced / Parts Used</h2>
+  <h2>Parts Used</h2>
   <table>
     <thead>
-      <tr><th>Qty</th><th>Part # / Code</th><th>Description</th><th class="num">Retail</th><th class="num">Line Total</th></tr>
+      <tr><th>Qty</th><th>Part # / Code</th><th>Description</th><th class="num">Unit Price</th><th class="num">Line Total</th></tr>
     </thead>
     <tbody>${partsRows}</tbody>
   </table>
 
-  <h2>Labor / Totals</h2>
+  <h2>Charges Summary</h2>
   <div class="totals">
-    <div><span>Parts Retail</span><strong>${money(partsRetail)}</strong></div>
+    <div><span>Parts</span><strong>${money(partsRetail)}</strong></div>
     <div><span>Labor (${htmlEscape(billedLaborHours.toFixed(2))} hrs @ ${money(workorder.laborRate)})</span><strong>${money(laborTotal)}</strong></div>
-    <div><span>Parts Cost</span><span>${money(partsCost)}</span></div>
-    <div class="grand"><span>Total</span><strong>${money(grandTotal)}</strong></div>
+    <div class="grand"><span>Total Due</span><strong>${money(grandTotal)}</strong></div>
   </div>
 
   <div class="signatures">
     ${signatureBlock}
-    <div class="line">Technician</div>
+    <div class="line">Technician Signature</div>
   </div>
 </body>
 </html>`;
