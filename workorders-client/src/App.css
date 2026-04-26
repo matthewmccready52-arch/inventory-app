@@ -1,5 +1,5 @@
 .workorders-shell {
-  width: min(1480px, 100%);
+  width: min(1500px, 100%);
   margin: 0 auto;
   padding: 24px;
 }
@@ -21,7 +21,8 @@
 .invoice-grid,
 .field-grid,
 .voice-grid,
-.top-actions {
+.top-actions,
+.dashboard-grid {
   display: grid;
   gap: 14px;
 }
@@ -68,16 +69,14 @@
 }
 
 .work-grid {
-  grid-template-columns: 320px minmax(0, 1fr);
+  grid-template-columns: 340px minmax(0, 1fr);
   margin-bottom: 16px;
 }
 
 .contact-grid,
-.invoice-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.detail-grid {
+.invoice-grid,
+.detail-grid,
+.dashboard-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
@@ -100,6 +99,22 @@
   align-items: end;
 }
 
+.inline-actions,
+.timer-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.timer-row {
+  justify-content: space-between;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  min-height: 42px;
+}
+
 .full-span {
   grid-column: span 2;
 }
@@ -116,6 +131,17 @@
 .tab-row button,
 .top-actions button {
   width: 100%;
+}
+
+.picker-list button {
+  text-align: left;
+}
+
+.picker-list button span,
+.picker-list button small,
+.stacked-row strong,
+.stacked-row small {
+  display: block;
 }
 
 .selected-item {
@@ -169,13 +195,33 @@
   padding-top: 10px;
 }
 
+.stacked-row {
+  align-items: start !important;
+}
+
+.signature-block {
+  display: grid;
+  gap: 12px;
+}
+
+.signature-canvas {
+  width: 100%;
+  max-width: 100%;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  touch-action: none;
+}
+
 .eyebrow,
 .muted,
 label,
 .summary-list,
 .parts-list,
 .picker-list,
-.panel p {
+.panel p,
+.picker-list button small,
+.stacked-row small {
   color: var(--muted);
 }
 
@@ -212,7 +258,7 @@ textarea {
 }
 
 .dictate-button {
-  min-width: 120px;
+  min-width: 130px;
 }
 
 .empty-state {
@@ -226,7 +272,8 @@ textarea {
   .work-grid,
   .contact-grid,
   .detail-grid,
-  .invoice-grid {
+  .invoice-grid,
+  .dashboard-grid {
     grid-template-columns: 1fr;
   }
 
@@ -246,5 +293,12 @@ textarea {
   .voice-grid,
   .machine-photo-row {
     grid-template-columns: 1fr;
+  }
+
+  .timer-row,
+  .summary-list > div,
+  .parts-list > div {
+    align-items: start;
+    flex-direction: column;
   }
 }

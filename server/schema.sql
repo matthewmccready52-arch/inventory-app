@@ -123,6 +123,11 @@ CREATE TABLE IF NOT EXISTS workorders (
   laborNotes TEXT,
   laborHours REAL DEFAULT 0,
   laborRate REAL DEFAULT 0,
+  laborStartedAt TEXT,
+  laborAccumulatedMs INTEGER DEFAULT 0,
+  customerSignatureDataUrl TEXT,
+  customerSignatureName TEXT,
+  customerSignedAt TEXT,
   createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
   updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
 );

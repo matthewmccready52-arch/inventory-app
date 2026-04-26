@@ -175,6 +175,11 @@ function createSystemTables() {
       laborNotes TEXT,
       laborHours REAL DEFAULT 0,
       laborRate REAL DEFAULT 0,
+      laborStartedAt TEXT,
+      laborAccumulatedMs INTEGER DEFAULT 0,
+      customerSignatureDataUrl TEXT,
+      customerSignatureName TEXT,
+      customerSignedAt TEXT,
       createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
       updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
@@ -291,6 +296,20 @@ function ensureSchema() {
     ensureColumn('equipment', names, 'serialPhotoUrl', 'TEXT');
     ensureColumn('equipment', names, 'fleetPhotoUrl', 'TEXT');
   });
+
+  db.all('PRAGMA table_info(workorders)', [], (err, columns) => {
+    if (err) {
+      console.error('Failed to inspect workorders schema', err);
+      return;
+    }
+
+    const names = columns.map((column) => column.name);
+    ensureColumn('workorders', names, 'laborStartedAt', 'TEXT');
+    ensureColumn('workorders', names, 'laborAccumulatedMs', 'INTEGER DEFAULT 0');
+    ensureColumn('workorders', names, 'customerSignatureDataUrl', 'TEXT');
+    ensureColumn('workorders', names, 'customerSignatureName', 'TEXT');
+    ensureColumn('workorders', names, 'customerSignedAt', 'TEXT');
+  });
 }
 
 ensureSchema();
@@ -312,6 +331,14 @@ function htmlEscape(value) {
 
 function money(value) {
   return `$${(Number(value) || 0).toFixed(2)}`;
+}
+
+function computeLaborMs(workorder) {
+  const accumulated = Number(workorder?.laborAccumulatedMs || 0);
+  if (!workorder?.laborStartedAt) return accumulated;
+  const startedAt = new Date(workorder.laborStartedAt).getTime();
+  if (!Number.isFinite(startedAt)) return accumulated;
+  return Math.max(0, accumulated + (Date.now() - startedAt));
 }
 
 function dbGet(sql, params = []) {
@@ -522,6 +549,24 @@ app.get('/api/customers', (req, res) => {
   });
 });
 
+app.get('/api/customers/:id/workorders', (req, res) => {
+  db.all(
+    `SELECT w.*, e.name AS equipmentName
+     FROM workorders w
+     LEFT JOIN equipment e ON e.id = w.equipmentId
+     WHERE w.customerId = ?
+     ORDER BY w.updatedAt DESC, w.id DESC`,
+    [req.params.id],
+    (err, rows) => {
+      if (err) {
+        console.error(err);
+        return res.status(500).json({ error: 'Failed to load customer workorders' });
+      }
+      res.json(rows);
+    }
+  );
+});
+
 app.post('/api/customers', requireRole('owner', 'tech'), (req, res) => {
   const name = String(req.body.name || '').trim();
   const phone = String(req.body.phone || '').trim();
@@ -578,6 +623,24 @@ app.get('/api/equipment', (req, res) => {
       if (err) {
         console.error(err);
         return res.status(500).json({ error: 'Failed to load equipment' });
+      }
+      res.json(rows);
+    }
+  );
+});
+
+app.get('/api/equipment/:id/workorders', (req, res) => {
+  db.all(
+    `SELECT w.*, c.name AS customerName
+     FROM workorders w
+     LEFT JOIN customers c ON c.id = w.customerId
+     WHERE w.equipmentId = ?
+     ORDER BY w.updatedAt DESC, w.id DESC`,
+    [req.params.id],
+    (err, rows) => {
+      if (err) {
+        console.error(err);
+        return res.status(500).json({ error: 'Failed to load equipment workorders' });
       }
       res.json(rows);
     }
@@ -650,6 +713,27 @@ app.get('/api/workorders', (req, res) => {
   );
 });
 
+app.get('/api/workorders/:id', (req, res) => {
+  db.get(
+    `SELECT w.*, c.name AS customerName, c.phone AS customerPhone, c.email AS customerEmail,
+      e.name AS equipmentName, e.make AS equipmentMake, e.model AS equipmentModel,
+      e.serial AS equipmentSerial, e.unitNumber AS equipmentUnitNumber
+     FROM workorders w
+     LEFT JOIN customers c ON c.id = w.customerId
+     LEFT JOIN equipment e ON e.id = w.equipmentId
+     WHERE w.id = ?`,
+    [req.params.id],
+    (err, row) => {
+      if (err) {
+        console.error(err);
+        return res.status(500).json({ error: 'Failed to load workorder' });
+      }
+      if (!row) return res.status(404).json({ error: 'Workorder not found' });
+      res.json(row);
+    }
+  );
+});
+
 app.get('/api/workorders/:id/parts', (req, res) => {
   db.all(
     `SELECT wp.*, p.name AS partName, p.partNumber, p.quantity, p.unit
@@ -694,7 +778,9 @@ app.get('/api/workorders/:id/export', async (req, res) => {
 
     const partsRetail = parts.reduce((total, part) => total + Number(part.qtyUsed || 0) * Number(part.retailPrice || 0), 0);
     const partsCost = parts.reduce((total, part) => total + Number(part.qtyUsed || 0) * Number(part.unitCost || 0), 0);
-    const laborTotal = Number(workorder.laborHours || 0) * Number(workorder.laborRate || 0);
+    const trackedLaborHours = computeLaborMs(workorder) / 3600000;
+    const billedLaborHours = Math.max(Number(workorder.laborHours || 0), trackedLaborHours);
+    const laborTotal = billedLaborHours * Number(workorder.laborRate || 0);
     const grandTotal = partsRetail + laborTotal;
     const origin = `${req.protocol}://${req.get('host')}`;
     const imageUrl = (src) => {
@@ -721,6 +807,16 @@ app.get('/api/workorders/:id/export', async (req, res) => {
         <figcaption>${index === 0 ? 'Serial number photo' : 'Fleet/unit number photo'}</figcaption>
       </figure>
     `).join('');
+
+    const signatureBlock = workorder.customerSignatureDataUrl
+      ? `
+        <div>
+          <img src="${htmlEscape(workorder.customerSignatureDataUrl)}" alt="Customer signature">
+          <div class="signature-meta">${htmlEscape(workorder.customerSignatureName || 'Customer')}</div>
+          <div class="signature-meta">${htmlEscape(workorder.customerSignedAt || '')}</div>
+        </div>
+      `
+      : '<div class="line">Customer Signature</div>';
 
     const html = `<!doctype html>
 <html>
@@ -749,6 +845,7 @@ app.get('/api/workorders/:id/export', async (req, res) => {
     figcaption { color: #555; font-size: 12px; margin-top: 4px; }
     .signatures { display: grid; gap: 30px; grid-template-columns: repeat(2, 1fr); margin-top: 34px; }
     .line { border-top: 1px solid #111; padding-top: 5px; }
+    .signature-meta { color: #555; font-size: 12px; margin-top: 4px; }
     @media print { body { margin: 16px; } }
   </style>
 </head>
@@ -803,13 +900,13 @@ app.get('/api/workorders/:id/export', async (req, res) => {
   <h2>Labor / Totals</h2>
   <div class="totals">
     <div><span>Parts Retail</span><strong>${money(partsRetail)}</strong></div>
-    <div><span>Labor (${htmlEscape(workorder.laborHours || 0)} hrs @ ${money(workorder.laborRate)})</span><strong>${money(laborTotal)}</strong></div>
+    <div><span>Labor (${htmlEscape(billedLaborHours.toFixed(2))} hrs @ ${money(workorder.laborRate)})</span><strong>${money(laborTotal)}</strong></div>
     <div><span>Parts Cost</span><span>${money(partsCost)}</span></div>
     <div class="grand"><span>Total</span><strong>${money(grandTotal)}</strong></div>
   </div>
 
   <div class="signatures">
-    <div class="line">Customer Signature</div>
+    ${signatureBlock}
     <div class="line">Technician</div>
   </div>
 </body>
@@ -835,14 +932,23 @@ app.post('/api/workorders', requireRole('owner', 'tech'), (req, res) => {
   const laborNotes = String(req.body.laborNotes || '').trim();
   const laborHours = Number(req.body.laborHours) || 0;
   const laborRate = Number(req.body.laborRate) || 0;
+  const laborStartedAt = req.body.laborStartedAt ? String(req.body.laborStartedAt) : null;
+  const laborAccumulatedMs = Number(req.body.laborAccumulatedMs) || 0;
+  const customerSignatureDataUrl = String(req.body.customerSignatureDataUrl || '').trim();
+  const customerSignatureName = String(req.body.customerSignatureName || '').trim();
+  const customerSignedAt = String(req.body.customerSignedAt || '').trim();
 
   if (!title) return res.status(400).json({ error: 'Workorder title required' });
 
   db.run(
     `INSERT INTO workorders (
-      number, title, status, customerId, equipmentId, complaint, diagnosis, laborNotes, laborHours, laborRate
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [number, title, status, customerId, equipmentId, complaint, diagnosis, laborNotes, laborHours, laborRate],
+      number, title, status, customerId, equipmentId, complaint, diagnosis, laborNotes, laborHours, laborRate,
+      laborStartedAt, laborAccumulatedMs, customerSignatureDataUrl, customerSignatureName, customerSignedAt
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      number, title, status, customerId, equipmentId, complaint, diagnosis, laborNotes, laborHours, laborRate,
+      laborStartedAt, laborAccumulatedMs, customerSignatureDataUrl, customerSignatureName, customerSignedAt
+    ],
     function (err) {
       if (err) {
         console.error(err);
@@ -866,6 +972,11 @@ app.put('/api/workorders/:id', requireRole('owner', 'tech'), (req, res) => {
   const laborNotes = String(req.body.laborNotes || '').trim();
   const laborHours = Number(req.body.laborHours) || 0;
   const laborRate = Number(req.body.laborRate) || 0;
+  const laborStartedAt = req.body.laborStartedAt ? String(req.body.laborStartedAt) : null;
+  const laborAccumulatedMs = Number(req.body.laborAccumulatedMs) || 0;
+  const customerSignatureDataUrl = String(req.body.customerSignatureDataUrl || '').trim();
+  const customerSignatureName = String(req.body.customerSignatureName || '').trim();
+  const customerSignedAt = String(req.body.customerSignedAt || '').trim();
 
   if (!title || !number) return res.status(400).json({ error: 'Workorder number and title required' });
 
@@ -873,9 +984,13 @@ app.put('/api/workorders/:id', requireRole('owner', 'tech'), (req, res) => {
     `UPDATE workorders SET
       number = ?, title = ?, status = ?, customerId = ?, equipmentId = ?,
       complaint = ?, diagnosis = ?, laborNotes = ?, laborHours = ?, laborRate = ?,
+      laborStartedAt = ?, laborAccumulatedMs = ?, customerSignatureDataUrl = ?, customerSignatureName = ?, customerSignedAt = ?,
       updatedAt = CURRENT_TIMESTAMP
      WHERE id = ?`,
-    [number, title, status, customerId, equipmentId, complaint, diagnosis, laborNotes, laborHours, laborRate, id],
+    [
+      number, title, status, customerId, equipmentId, complaint, diagnosis, laborNotes, laborHours, laborRate,
+      laborStartedAt, laborAccumulatedMs, customerSignatureDataUrl, customerSignatureName, customerSignedAt, id
+    ],
     function (err) {
       if (err) {
         console.error(err);
@@ -885,6 +1000,70 @@ app.put('/api/workorders/:id', requireRole('owner', 'tech'), (req, res) => {
       res.json({ success: true, updated: this.changes });
     }
   );
+});
+
+app.post('/api/workorders/:id/timer/start', requireRole('owner', 'tech'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const workorder = await dbGet('SELECT * FROM workorders WHERE id = ?', [id]);
+    if (!workorder) return res.status(404).json({ error: 'Workorder not found' });
+    if (workorder.laborStartedAt) {
+      return res.json({ success: true, alreadyRunning: true, laborStartedAt: workorder.laborStartedAt });
+    }
+
+    const startedAt = new Date().toISOString();
+    db.run(
+      'UPDATE workorders SET laborStartedAt = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?',
+      [startedAt, id],
+      function (err) {
+        if (err) {
+          console.error(err);
+          return res.status(500).json({ error: 'Failed to start labor timer' });
+        }
+        writeAudit(req, 'start-labor-timer', 'workorder', id, { startedAt });
+        res.json({ success: true, laborStartedAt: startedAt });
+      }
+    );
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to start labor timer' });
+  }
+});
+
+app.post('/api/workorders/:id/timer/stop', requireRole('owner', 'tech'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const workorder = await dbGet('SELECT * FROM workorders WHERE id = ?', [id]);
+    if (!workorder) return res.status(404).json({ error: 'Workorder not found' });
+    if (!workorder.laborStartedAt) {
+      return res.json({
+        success: true,
+        laborAccumulatedMs: Number(workorder.laborAccumulatedMs || 0),
+        laborHours: Number(workorder.laborHours || 0)
+      });
+    }
+
+    const elapsedMs = computeLaborMs(workorder);
+    const laborHours = Math.max(Number(workorder.laborHours || 0), elapsedMs / 3600000);
+
+    db.run(
+      `UPDATE workorders
+       SET laborStartedAt = NULL, laborAccumulatedMs = ?, laborHours = ?, updatedAt = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+      [elapsedMs, laborHours, id],
+      function (err) {
+        if (err) {
+          console.error(err);
+          return res.status(500).json({ error: 'Failed to stop labor timer' });
+        }
+        writeAudit(req, 'stop-labor-timer', 'workorder', id, { laborAccumulatedMs: elapsedMs, laborHours });
+        res.json({ success: true, laborAccumulatedMs: elapsedMs, laborHours });
+      }
+    );
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to stop labor timer' });
+  }
 });
 
 app.post('/api/workorders/:id/parts', requireRole('owner', 'tech'), (req, res) => {
@@ -992,6 +1171,82 @@ app.delete('/api/workorder-parts/:id', requireRole('owner', 'tech'), (req, res) 
       res.json({ success: true, deleted: this.changes });
     });
   });
+});
+
+app.post('/api/workorder-parts/:id/return', requireRole('owner', 'tech'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const qty = Number(req.body.qty || 0);
+    const note = String(req.body.note || '').trim();
+    if (!qty || qty <= 0) return res.status(400).json({ error: 'Return quantity required' });
+
+    const row = await dbGet(
+      `SELECT wp.*, w.number AS workorderNumber, w.customerId, w.equipmentId, p.quantity AS partQuantity
+       FROM workorder_parts wp
+       LEFT JOIN workorders w ON w.id = wp.workorderId
+       LEFT JOIN parts p ON p.id = wp.partId
+       WHERE wp.id = ?`,
+      [id]
+    );
+    if (!row) return res.status(404).json({ error: 'Workorder part not found' });
+    if (Number(row.qtyUsed || 0) < qty) return res.status(400).json({ error: 'Cannot return more than was used' });
+
+    const nextQtyUsed = Number(row.qtyUsed || 0) - qty;
+    const nextQtyReserved = Math.max(0, Number(row.qtyReserved || 0) - qty);
+    const nextPartQuantity = Number(row.partQuantity || 0) + qty;
+
+    db.serialize(() => {
+      db.run('BEGIN TRANSACTION');
+      db.run('UPDATE parts SET quantity = ? WHERE id = ?', [nextPartQuantity, row.partId]);
+      db.run(
+        `UPDATE workorder_parts
+         SET qtyUsed = ?, qtyReserved = ?, note = TRIM(COALESCE(note, '') || ?), updatedAt = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [nextQtyUsed, nextQtyReserved, note ? `\nReturn: ${note}` : '', id],
+        (updateErr) => {
+          if (updateErr) {
+            console.error(updateErr);
+            db.run('ROLLBACK');
+            return res.status(500).json({ error: 'Failed to update workorder part return' });
+          }
+          db.run('UPDATE workorders SET updatedAt = CURRENT_TIMESTAMP WHERE id = ?', [row.workorderId]);
+          db.run(
+            `INSERT INTO transactions (
+              partId, type, qtyChange, note, workorderRef, customerRef, equipmentRef, unitCost
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              row.partId,
+              'workorder-return',
+              qty,
+              note || `Returned from ${row.workorderNumber}`,
+              row.workorderNumber || '',
+              row.customerId || '',
+              row.equipmentId || '',
+              row.unitCost || 0
+            ]
+          );
+          writeStockMovement(req, row.partId, 'workorder-return', qty, nextPartQuantity, {
+            reason: note || `Returned from ${row.workorderNumber}`,
+            workorderRef: row.workorderNumber || '',
+            customerRef: row.customerId || '',
+            equipmentRef: row.equipmentId || '',
+            unitCost: row.unitCost || 0
+          });
+          db.run('COMMIT', (commitErr) => {
+            if (commitErr) {
+              console.error(commitErr);
+              return res.status(500).json({ error: 'Failed to finish part return' });
+            }
+            writeAudit(req, 'return-used-part', 'workorder', row.workorderId, { workorderPartId: id, qty });
+            res.json({ success: true, qtyReturned: qty, nextQtyUsed, nextPartQuantity });
+          });
+        }
+      );
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to return used part' });
+  }
 });
 
 // PARTS
