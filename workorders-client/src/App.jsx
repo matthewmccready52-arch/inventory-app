@@ -3,6 +3,14 @@ import { SpeechRecognition } from '@capacitor-community/speech-recognition'
 
 const host = window.location.hostname || 'localhost'
 const defaultApiBase = `http://${host}:3001`
+const LOCAL_DB_KEY = 'workorders:offline-db'
+const LOCAL_MODE_KEY = 'workorders:storageMode'
+
+const localUsers = [
+  { id: 1, name: 'Owner', role: 'owner', pin: '1234' },
+  { id: 2, name: 'Tech', role: 'tech', pin: '2468' },
+  { id: 3, name: 'Viewer', role: 'viewer', pin: '0000' }
+]
 
 const emptyLogin = { name: 'Owner', pin: '' }
 const emptyCustomer = { name: '', phone: '', email: '', notes: '' }
@@ -39,6 +47,7 @@ const emptyWorkorder = {
   customerSignedAt: ''
 }
 const emptyWorkorderPart = { partId: '', qty: 1, mode: 'reserve', note: '' }
+const emptyLocalPart = { name: '', partNumber: '', quantity: 1, unitCost: 0, retailPrice: 0 }
 const statusOptions = ['open', 'in progress', 'quote pending', 'waiting parts', 'complete', 'invoiced', 'picked up']
 
 function getSpeechRecognition() {
@@ -109,8 +118,297 @@ function parseWorkorderSpeech(text) {
   return next
 }
 
+function computeLaborMs(workorder) {
+  const accumulated = Number(workorder?.laborAccumulatedMs || 0)
+  if (!workorder?.laborStartedAt) return accumulated
+  const startedAt = new Date(workorder.laborStartedAt).getTime()
+  if (!Number.isFinite(startedAt)) return accumulated
+  return Math.max(0, accumulated + (Date.now() - startedAt))
+}
+
+function htmlEscape(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function createDefaultLocalDb() {
+  return {
+    meta: {
+      nextCustomerId: 1,
+      nextEquipmentId: 1,
+      nextPartId: 1,
+      nextWorkorderId: 1,
+      nextWorkorderPartId: 1
+    },
+    users: localUsers,
+    customers: [],
+    equipment: [],
+    parts: [],
+    workorders: [],
+    workorderParts: []
+  }
+}
+
+function loadLocalDb() {
+  try {
+    const raw = localStorage.getItem(LOCAL_DB_KEY)
+    if (!raw) {
+      const fresh = createDefaultLocalDb()
+      localStorage.setItem(LOCAL_DB_KEY, JSON.stringify(fresh))
+      return fresh
+    }
+    const parsed = JSON.parse(raw)
+    return {
+      ...createDefaultLocalDb(),
+      ...parsed,
+      meta: { ...createDefaultLocalDb().meta, ...(parsed.meta || {}) },
+      users: parsed.users?.length ? parsed.users : localUsers,
+      customers: parsed.customers || [],
+      equipment: parsed.equipment || [],
+      parts: parsed.parts || [],
+      workorders: parsed.workorders || [],
+      workorderParts: parsed.workorderParts || []
+    }
+  } catch {
+    const fresh = createDefaultLocalDb()
+    localStorage.setItem(LOCAL_DB_KEY, JSON.stringify(fresh))
+    return fresh
+  }
+}
+
+function saveLocalDb(db) {
+  localStorage.setItem(LOCAL_DB_KEY, JSON.stringify(db))
+}
+
+function withLocalDb(mutator) {
+  const db = loadLocalDb()
+  const result = mutator(db)
+  saveLocalDb(db)
+  return result
+}
+
+function getReservedQtyForPart(db, partId) {
+  return db.workorderParts.reduce((sum, row) => sum + Math.max(0, Number(row.partId) === Number(partId) ? Number(row.qtyReserved || 0) - Number(row.qtyUsed || 0) : 0), 0)
+}
+
+function buildLocalParts(db) {
+  return db.parts.map((part) => {
+    const reservedQty = getReservedQtyForPart(db, part.id)
+    return {
+      ...part,
+      reservedQty,
+      availableQty: Number(part.quantity || 0) - reservedQty
+    }
+  })
+}
+
+function buildLocalWorkorders(db) {
+  return db.workorders.map((workorder) => {
+    const customer = db.customers.find((item) => Number(item.id) === Number(workorder.customerId))
+    const machine = db.equipment.find((item) => Number(item.id) === Number(workorder.equipmentId))
+    const workorderRows = db.workorderParts.filter((row) => Number(row.workorderId) === Number(workorder.id))
+    const partsCost = workorderRows.reduce((sum, row) => sum + Number(row.qtyUsed || 0) * Number(row.unitCost || 0), 0)
+    const partsRetail = workorderRows.reduce((sum, row) => sum + Number(row.qtyUsed || 0) * Number(row.retailPrice || 0), 0)
+    const reservedCount = workorderRows.reduce((sum, row) => sum + Number(row.qtyReserved || 0), 0)
+    const usedCount = workorderRows.reduce((sum, row) => sum + Number(row.qtyUsed || 0), 0)
+    return {
+      ...workorder,
+      customerName: customer?.name || '',
+      equipmentName: machine?.name || '',
+      partsCost,
+      partsRetail,
+      reservedCount,
+      usedCount
+    }
+  }).sort((a, b) => new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0))
+}
+
+function buildLocalWorkorderBundle(db, workorderId) {
+  const workorder = db.workorders.find((item) => Number(item.id) === Number(workorderId))
+  if (!workorder) return null
+  const customer = db.customers.find((item) => Number(item.id) === Number(workorder.customerId))
+  const machine = db.equipment.find((item) => Number(item.id) === Number(workorder.equipmentId))
+  const partRows = db.workorderParts
+    .filter((row) => Number(row.workorderId) === Number(workorder.id))
+    .map((row) => {
+      const part = db.parts.find((item) => Number(item.id) === Number(row.partId))
+      return {
+        ...row,
+        partName: part?.name || 'Unknown part',
+        partNumber: part?.partNumber || '',
+        quantity: part?.quantity || 0,
+        unit: part?.unit || 'each'
+      }
+    })
+    .sort((a, b) => Number(b.id) - Number(a.id))
+
+  return {
+    detail: {
+      ...workorder,
+      customerName: customer?.name || '',
+      customerPhone: customer?.phone || '',
+      customerEmail: customer?.email || '',
+      customerNotes: customer?.notes || '',
+      equipmentName: machine?.name || '',
+      equipmentMake: machine?.make || '',
+      equipmentModel: machine?.model || '',
+      equipmentSerial: machine?.serial || '',
+      equipmentUnitNumber: machine?.unitNumber || ''
+    },
+    parts: partRows,
+    customerHistory: db.workorders
+      .filter((item) => Number(item.customerId) === Number(workorder.customerId) && Number(item.id) !== Number(workorder.id))
+      .map((item) => ({
+        ...item,
+        equipmentName: db.equipment.find((eq) => Number(eq.id) === Number(item.equipmentId))?.name || ''
+      }))
+      .sort((a, b) => new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0)),
+    equipmentHistory: db.workorders
+      .filter((item) => Number(item.equipmentId) === Number(workorder.equipmentId) && Number(item.id) !== Number(workorder.id))
+      .map((item) => ({
+        ...item,
+        customerName: db.customers.find((c) => Number(c.id) === Number(item.customerId))?.name || ''
+      }))
+      .sort((a, b) => new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0))
+  }
+}
+
+function nextId(meta, key) {
+  const value = meta[key]
+  meta[key] += 1
+  return value
+}
+
+function nowIso() {
+  return new Date().toISOString()
+}
+
+function buildWorkorderHtml(workorder, customer, machine, partRows, originLabel = 'Local device storage') {
+  const partsRetail = partRows.reduce((sum, row) => sum + Number(row.qtyUsed || 0) * Number(row.retailPrice || 0), 0)
+  const partsCost = partRows.reduce((sum, row) => sum + Number(row.qtyUsed || 0) * Number(row.unitCost || 0), 0)
+  const billedLaborHours = Math.max(Number(workorder.laborHours || 0), computeLaborMs(workorder) / 3600000)
+  const laborTotal = billedLaborHours * Number(workorder.laborRate || 0)
+  const grandTotal = partsRetail + laborTotal
+  const partsRows = partRows.length
+    ? partRows.map((part) => `
+      <tr>
+        <td>${htmlEscape(part.qtyUsed || part.qtyReserved || 0)}</td>
+        <td>${htmlEscape(part.partNumber || '')}</td>
+        <td>${htmlEscape(part.partName || 'Unknown part')}${part.note ? `<br><small>${htmlEscape(part.note)}</small>` : ''}</td>
+        <td class="num">${formatCurrency(part.retailPrice)}</td>
+        <td class="num">${formatCurrency(Number(part.qtyUsed || 0) * Number(part.retailPrice || 0))}</td>
+      </tr>`).join('')
+    : '<tr><td colspan="5">No parts recorded.</td></tr>'
+
+  const photos = [machine?.serialPhotoUrl, machine?.fleetPhotoUrl].filter(Boolean).map((src, index) => `
+    <figure>
+      <img src="${htmlEscape(src)}" alt="">
+      <figcaption>${index === 0 ? 'Serial number photo' : 'Fleet/unit number photo'}</figcaption>
+    </figure>
+  `).join('')
+
+  const signatureBlock = workorder.customerSignatureDataUrl
+    ? `
+      <div>
+        <img src="${htmlEscape(workorder.customerSignatureDataUrl)}" alt="Customer signature">
+        <div class="signature-meta">${htmlEscape(workorder.customerSignatureName || 'Customer')}</div>
+        <div class="signature-meta">${htmlEscape(workorder.customerSignedAt || '')}</div>
+      </div>`
+    : '<div class="line">Customer Signature</div>'
+
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>${htmlEscape(workorder.number)} Workorder</title>
+  <style>
+    body { color: #111; font-family: Arial, sans-serif; line-height: 1.35; margin: 28px; }
+    header { align-items: start; border-bottom: 3px solid #111; display: flex; justify-content: space-between; padding-bottom: 12px; }
+    h1, h2, p { margin: 0; }
+    h1 { font-size: 28px; }
+    h2 { border-bottom: 1px solid #bbb; font-size: 17px; margin: 24px 0 8px; padding-bottom: 4px; }
+    .muted { color: #555; }
+    .grid { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .box { border: 1px solid #bbb; border-radius: 6px; padding: 10px; }
+    table { border-collapse: collapse; margin-top: 8px; width: 100%; }
+    th, td { border: 1px solid #aaa; padding: 7px; text-align: left; vertical-align: top; }
+    th { background: #eee; }
+    .num { text-align: right; }
+    .totals { margin-left: auto; max-width: 360px; }
+    .totals div { display: flex; justify-content: space-between; padding: 6px 0; }
+    .grand { border-top: 2px solid #111; font-size: 20px; font-weight: 700; }
+    .photos { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    figure { margin: 0; }
+    img { border: 1px solid #aaa; max-height: 260px; max-width: 100%; object-fit: contain; }
+    figcaption { color: #555; font-size: 12px; margin-top: 4px; }
+    .signatures { display: grid; gap: 30px; grid-template-columns: repeat(2, 1fr); margin-top: 34px; }
+    .line { border-top: 1px solid #111; padding-top: 5px; }
+    .signature-meta { color: #555; font-size: 12px; margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Work Order / Invoice Draft</h1>
+      <p class="muted">Generated ${htmlEscape(new Date().toLocaleString())}</p>
+      <p class="muted">${htmlEscape(originLabel)}</p>
+    </div>
+    <div>
+      <h2>${htmlEscape(workorder.number)}</h2>
+      <p>Status: ${htmlEscape(workorder.status)}</p>
+      <p>Date In: ${htmlEscape(workorder.createdAt || '')}</p>
+    </div>
+  </header>
+  <section class="grid">
+    <div class="box">
+      <h2>Customer</h2>
+      <p><strong>${htmlEscape(customer?.name || 'No customer')}</strong></p>
+      <p>${htmlEscape(customer?.phone || '')}</p>
+      <p>${htmlEscape(customer?.email || '')}</p>
+      <p>${htmlEscape(customer?.notes || '')}</p>
+    </div>
+    <div class="box">
+      <h2>Machine</h2>
+      <p><strong>${htmlEscape(machine?.name || 'No equipment')}</strong></p>
+      <p>${htmlEscape([machine?.year, machine?.make, machine?.model].filter(Boolean).join(' '))}</p>
+      <p>Fleet/Unit: ${htmlEscape(machine?.unitNumber || '')}</p>
+      <p>Serial: ${htmlEscape(machine?.serial || '')}</p>
+      <p>VIN: ${htmlEscape(machine?.vin || '')}</p>
+      <p>Hours/Mileage: ${htmlEscape([machine?.hours, machine?.mileage].filter(Boolean).join(' / '))}</p>
+    </div>
+  </section>
+  <h2>Drop-Off / Complaint</h2>
+  <div class="box">${htmlEscape(workorder.complaint || '').replace(/\n/g, '<br>') || 'No complaint recorded.'}</div>
+  <h2>Diagnosis / Work Notes</h2>
+  <div class="box">${htmlEscape(workorder.diagnosis || workorder.laborNotes || '').replace(/\n/g, '<br>') || 'No notes recorded.'}</div>
+  ${photos ? `<h2>Machine Intake Photos</h2><div class="photos">${photos}</div>` : ''}
+  <h2>Parts Replaced / Parts Used</h2>
+  <table>
+    <thead><tr><th>Qty</th><th>Part # / Code</th><th>Description</th><th class="num">Retail</th><th class="num">Line Total</th></tr></thead>
+    <tbody>${partsRows}</tbody>
+  </table>
+  <h2>Labor / Totals</h2>
+  <div class="totals">
+    <div><span>Parts Retail</span><strong>${formatCurrency(partsRetail)}</strong></div>
+    <div><span>Labor (${htmlEscape(billedLaborHours.toFixed(2))} hrs @ ${formatCurrency(workorder.laborRate)})</span><strong>${formatCurrency(laborTotal)}</strong></div>
+    <div><span>Parts Cost</span><span>${formatCurrency(partsCost)}</span></div>
+    <div class="grand"><span>Total</span><strong>${formatCurrency(grandTotal)}</strong></div>
+  </div>
+  <div class="signatures">
+    ${signatureBlock}
+    <div class="line">Technician</div>
+  </div>
+</body>
+</html>`
+}
+
 export default function App() {
   const [apiBase, setApiBase] = useState(() => localStorage.getItem('workorders:apiBase') || defaultApiBase)
+  const [storageMode, setStorageMode] = useState(() => localStorage.getItem(LOCAL_MODE_KEY) || 'auto')
   const [status, setStatus] = useState('')
   const [users, setUsers] = useState([])
   const [customers, setCustomers] = useState([])
@@ -122,6 +420,7 @@ export default function App() {
   const [equipmentHistory, setEquipmentHistory] = useState([])
   const [searchText, setSearchText] = useState('')
   const [signatureName, setSignatureName] = useState('')
+  const [backendReachable, setBackendReachable] = useState(false)
   const [currentUser, setCurrentUser] = useState(() => {
     const saved = localStorage.getItem('workorders:currentUser')
     return saved ? JSON.parse(saved) : null
@@ -131,6 +430,7 @@ export default function App() {
   const [machineForm, setMachineForm] = useState(emptyMachine)
   const [workorderForm, setWorkorderForm] = useState(emptyWorkorder)
   const [partForm, setPartForm] = useState(emptyWorkorderPart)
+  const [localPartForm, setLocalPartForm] = useState(emptyLocalPart)
   const [activeTab, setActiveTab] = useState('dashboard')
   const [selectedWorkorderId, setSelectedWorkorderId] = useState('')
   const [selectedCustomerId, setSelectedCustomerId] = useState('')
@@ -142,33 +442,39 @@ export default function App() {
   const drawingRef = useRef(false)
   const API = `${apiBase.replace(/\/$/, '')}/api`
   const ASSET_BASE = apiBase.replace(/\/$/, '')
+  const activeMode = storageMode === 'local' || !backendReachable ? 'local' : 'server'
   const canWrite = currentUser && ['owner', 'tech'].includes(currentUser.role)
 
   function authHeaders(extra = {}) {
     return currentUser ? { ...extra, 'x-user-id': String(currentUser.id) } : extra
   }
 
-  function apiFetch(url, options = {}) {
+  function updateForm(setter, field, value) {
+    setter((current) => ({ ...current, [field]: value }))
+  }
+
+  function assetUrl(src) {
+    if (!src) return ''
+    return src.startsWith('/uploads/') ? `${ASSET_BASE}${src}` : src
+  }
+
+  async function apiFetch(url, options = {}) {
     return fetch(url, {
       ...options,
       headers: authHeaders(options.headers || {})
     })
   }
 
-  const loadAll = useCallback(async () => {
-    const [usersRes, customersRes, equipmentRes, partsRes, workordersRes] = await Promise.all([
-      fetch(`${API}/users`),
-      fetch(`${API}/customers`),
-      fetch(`${API}/equipment`),
-      fetch(`${API}/parts`),
-      fetch(`${API}/workorders`)
-    ])
-
-    const nextUsers = await usersRes.json()
-    const nextCustomers = await customersRes.json()
-    const nextEquipment = await equipmentRes.json()
-    const nextParts = await partsRes.json()
-    const nextWorkorders = await workordersRes.json()
+  const loadLocalAll = useCallback(() => {
+    const db = loadLocalDb()
+    const nextUsers = db.users.map((user) => ({ id: user.id, name: user.name, role: user.role }))
+    const nextCustomers = [...db.customers].sort((a, b) => String(a.name).localeCompare(String(b.name)))
+    const nextEquipment = db.equipment.map((item) => ({
+      ...item,
+      customerName: db.customers.find((customer) => Number(customer.id) === Number(item.customerId))?.name || ''
+    })).sort((a, b) => String(a.name).localeCompare(String(b.name)))
+    const nextParts = buildLocalParts(db).sort((a, b) => String(a.name).localeCompare(String(b.name)))
+    const nextWorkorders = buildLocalWorkorders(db)
 
     setUsers(nextUsers)
     setCustomers(nextCustomers)
@@ -178,7 +484,48 @@ export default function App() {
 
     if (!selectedCustomerId && nextCustomers[0]) setSelectedCustomerId(String(nextCustomers[0].id))
     if (!selectedWorkorderId && nextWorkorders[0]) setSelectedWorkorderId(String(nextWorkorders[0].id))
-  }, [API, selectedCustomerId, selectedWorkorderId])
+  }, [selectedCustomerId, selectedWorkorderId])
+
+  const loadAll = useCallback(async () => {
+    if (storageMode === 'local') {
+      setBackendReachable(false)
+      loadLocalAll()
+      return
+    }
+
+    try {
+      const [usersRes, customersRes, equipmentRes, partsRes, workordersRes] = await Promise.all([
+        fetch(`${API}/users`),
+        fetch(`${API}/customers`),
+        fetch(`${API}/equipment`),
+        fetch(`${API}/parts`),
+        fetch(`${API}/workorders`)
+      ])
+      if (![usersRes, customersRes, equipmentRes, partsRes, workordersRes].every((res) => res.ok)) {
+        throw new Error('Backend did not respond cleanly.')
+      }
+
+      const nextUsers = await usersRes.json()
+      const nextCustomers = await customersRes.json()
+      const nextEquipment = await equipmentRes.json()
+      const nextParts = await partsRes.json()
+      const nextWorkorders = await workordersRes.json()
+
+      setUsers(nextUsers)
+      setCustomers(nextCustomers)
+      setEquipment(nextEquipment)
+      setParts(nextParts)
+      setWorkorders(nextWorkorders)
+      setBackendReachable(true)
+
+      if (!selectedCustomerId && nextCustomers[0]) setSelectedCustomerId(String(nextCustomers[0].id))
+      if (!selectedWorkorderId && nextWorkorders[0]) setSelectedWorkorderId(String(nextWorkorders[0].id))
+    } catch {
+      setBackendReachable(false)
+      loadLocalAll()
+      setStatus('Backend unavailable. Using local device storage.')
+    }
+  }, [API, loadLocalAll, selectedCustomerId, selectedWorkorderId, storageMode])
 
   const loadSelectedWorkorderData = useCallback(async (workorderId) => {
     if (!workorderId) {
@@ -188,32 +535,51 @@ export default function App() {
       return
     }
 
-    const detailRes = await fetch(`${API}/workorders/${workorderId}`)
-    if (!detailRes.ok) return
-    const detail = await detailRes.json()
+    if (activeMode === 'local') {
+      const bundle = buildLocalWorkorderBundle(loadLocalDb(), workorderId)
+      if (!bundle) return
+      setWorkorderParts(bundle.parts)
+      setCustomerHistory(bundle.customerHistory)
+      setEquipmentHistory(bundle.equipmentHistory)
+      setWorkorderForm(normalizeWorkorderForForm(bundle.detail))
+      setSignatureName(bundle.detail.customerSignatureName || bundle.detail.customerName || '')
+      setLiveTimerMs(Number(bundle.detail.laborAccumulatedMs || 0))
+      return
+    }
 
-    const requests = [
-      fetch(`${API}/workorders/${workorderId}/parts`)
-    ]
-    if (detail.customerId) requests.push(fetch(`${API}/customers/${detail.customerId}/workorders`))
-    if (detail.equipmentId) requests.push(fetch(`${API}/equipment/${detail.equipmentId}/workorders`))
-
-    const responses = await Promise.all(requests)
-    const partsData = await responses[0].json()
-    const customerData = responses[1] ? await responses[1].json() : []
-    const equipmentData = responses[2] ? await responses[2].json() : []
-
-    setWorkorderParts(partsData)
-    setCustomerHistory(customerData.filter((item) => String(item.id) !== String(workorderId)))
-    setEquipmentHistory(equipmentData.filter((item) => String(item.id) !== String(workorderId)))
-    setWorkorderForm(normalizeWorkorderForForm(detail))
-    setSignatureName(detail.customerSignatureName || detail.customerName || '')
-    setLiveTimerMs(Number(detail.laborAccumulatedMs || 0))
-  }, [API])
+    try {
+      const detailRes = await fetch(`${API}/workorders/${workorderId}`)
+      if (!detailRes.ok) return
+      const detail = await detailRes.json()
+      const requests = [fetch(`${API}/workorders/${workorderId}/parts`)]
+      if (detail.customerId) requests.push(fetch(`${API}/customers/${detail.customerId}/workorders`))
+      if (detail.equipmentId) requests.push(fetch(`${API}/equipment/${detail.equipmentId}/workorders`))
+      const responses = await Promise.all(requests)
+      const partsData = await responses[0].json()
+      const customerData = responses[1] ? await responses[1].json() : []
+      const equipmentData = responses[2] ? await responses[2].json() : []
+      setWorkorderParts(partsData)
+      setCustomerHistory(customerData.filter((item) => String(item.id) !== String(workorderId)))
+      setEquipmentHistory(equipmentData.filter((item) => String(item.id) !== String(workorderId)))
+      setWorkorderForm(normalizeWorkorderForForm(detail))
+      setSignatureName(detail.customerSignatureName || detail.customerName || '')
+      setLiveTimerMs(Number(detail.laborAccumulatedMs || 0))
+    } catch {
+      setBackendReachable(false)
+      const bundle = buildLocalWorkorderBundle(loadLocalDb(), workorderId)
+      if (!bundle) return
+      setWorkorderParts(bundle.parts)
+      setCustomerHistory(bundle.customerHistory)
+      setEquipmentHistory(bundle.equipmentHistory)
+      setWorkorderForm(normalizeWorkorderForForm(bundle.detail))
+      setSignatureName(bundle.detail.customerSignatureName || bundle.detail.customerName || '')
+      setLiveTimerMs(Number(bundle.detail.laborAccumulatedMs || 0))
+    }
+  }, [API, activeMode])
 
   useEffect(() => {
     Promise.resolve().then(loadAll).catch(() => {
-      setStatus('Could not reach the backend. Make sure the server is running.')
+      setStatus('Could not load workorders data.')
     })
   }, [loadAll])
 
@@ -274,10 +640,8 @@ export default function App() {
 
   useEffect(() => {
     if (!workorderForm.laborStartedAt) return undefined
-
     const startedAt = new Date(workorderForm.laborStartedAt).getTime()
     if (!Number.isFinite(startedAt)) return undefined
-
     const tick = () => setLiveTimerMs(Date.now() - startedAt)
     tick()
     const intervalId = window.setInterval(tick, 1000)
@@ -293,7 +657,6 @@ export default function App() {
     context.strokeStyle = '#061310'
     context.lineWidth = 2
     context.lineCap = 'round'
-
     if (!workorderForm.customerSignatureDataUrl) return
     const image = new Image()
     image.onload = () => {
@@ -304,18 +667,8 @@ export default function App() {
     image.src = workorderForm.customerSignatureDataUrl
   }, [workorderForm.customerSignatureDataUrl, selectedWorkorderId])
 
-  function updateForm(setter, field, value) {
-    setter((current) => ({ ...current, [field]: value }))
-  }
-
-  function assetUrl(src) {
-    if (!src) return ''
-    return src.startsWith('/uploads/') ? `${ASSET_BASE}${src}` : src
-  }
-
   function applySpeechText(formName, field, text, setter) {
     if (!text) return
-
     if (formName === 'machine' && field === '__smart__') {
       const parsed = parseMachineSpeech(text)
       setter((current) => ({
@@ -326,7 +679,6 @@ export default function App() {
       setStatus('Voice intake parsed into machine fields.')
       return
     }
-
     if (formName === 'workorder' && field === '__smart__') {
       const parsed = parseWorkorderSpeech(text)
       setter((current) => ({
@@ -338,7 +690,6 @@ export default function App() {
       setStatus('Voice intake parsed into workorder fields.')
       return
     }
-
     setter((current) => ({
       ...current,
       [field]: [current[field], text].filter(Boolean).join(current[field] ? ' ' : '')
@@ -348,6 +699,20 @@ export default function App() {
 
   async function login(event) {
     event.preventDefault()
+
+    if (activeMode === 'local') {
+      const user = loadLocalDb().users.find((item) => item.name === loginForm.name && item.pin === loginForm.pin)
+      if (!user) {
+        setStatus('Could not sign in.')
+        return
+      }
+      const safeUser = { id: user.id, name: user.name, role: user.role }
+      localStorage.setItem('workorders:currentUser', JSON.stringify(safeUser))
+      setCurrentUser(safeUser)
+      setStatus(`Signed in as ${safeUser.name} on this device.`)
+      return
+    }
+
     const res = await fetch(`${API}/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -376,7 +741,19 @@ export default function App() {
     setStatus(`Server URL saved: ${cleaned}`)
   }
 
+  function saveStorageMode(nextMode) {
+    localStorage.setItem(LOCAL_MODE_KEY, nextMode)
+    setStorageMode(nextMode)
+    if (nextMode === 'local') {
+      setBackendReachable(false)
+      setStatus('Offline mode enabled. Using local device storage.')
+    } else {
+      setStatus('Auto mode enabled. The app will use the server when available.')
+    }
+  }
+
   async function uploadDataUrl(dataUrl, fileName) {
+    if (activeMode === 'local') return dataUrl
     const res = await apiFetch(`${API}/uploads/image`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -394,7 +771,7 @@ export default function App() {
       try {
         const imageUrl = await uploadDataUrl(String(reader.result || ''), file.name)
         updateForm(setMachineForm, field, imageUrl)
-        setStatus(field === 'serialPhotoUrl' ? 'Serial photo uploaded.' : 'Fleet photo uploaded.')
+        setStatus(field === 'serialPhotoUrl' ? 'Serial photo stored.' : 'Fleet photo stored.')
       } catch (err) {
         setStatus(err.message)
       }
@@ -411,7 +788,6 @@ export default function App() {
           setStatus('Microphone permission is required for dictation.')
           return
         }
-
         setDictatingField(`${formName}:${field}`)
         const result = await SpeechRecognition.start({
           language: 'en-US',
@@ -426,7 +802,7 @@ export default function App() {
         return
       }
     } catch {
-      // Browser fallback below.
+      // Fall through to browser speech.
     }
 
     const BrowserSpeech = getSpeechRecognition()
@@ -434,9 +810,7 @@ export default function App() {
       setStatus('Voice dictation is not available in this browser.')
       return
     }
-
     if (recognitionRef.current) recognitionRef.current.stop()
-
     const recognition = new BrowserSpeech()
     recognition.lang = 'en-US'
     recognition.interimResults = false
@@ -457,6 +831,21 @@ export default function App() {
 
   async function addCustomer() {
     if (!canWrite || !customerForm.name.trim()) return
+
+    if (activeMode === 'local') {
+      withLocalDb((db) => {
+        db.customers.push({
+          id: nextId(db.meta, 'nextCustomerId'),
+          ...customerForm,
+          createdAt: nowIso()
+        })
+      })
+      setCustomerForm(emptyCustomer)
+      setStatus('Customer saved on this device.')
+      loadLocalAll()
+      return
+    }
+
     const res = await apiFetch(`${API}/customers`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -474,6 +863,22 @@ export default function App() {
 
   async function addMachine() {
     if (!canWrite || !machineForm.name.trim()) return
+
+    if (activeMode === 'local') {
+      withLocalDb((db) => {
+        db.equipment.push({
+          id: nextId(db.meta, 'nextEquipmentId'),
+          ...machineForm,
+          customerId: machineForm.customerId ? Number(machineForm.customerId) : null,
+          createdAt: nowIso()
+        })
+      })
+      setMachineForm({ ...emptyMachine, customerId: machineForm.customerId })
+      setStatus('Machine saved on this device.')
+      loadLocalAll()
+      return
+    }
+
     const res = await apiFetch(`${API}/equipment`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -492,8 +897,54 @@ export default function App() {
     loadAll()
   }
 
+  async function addLocalPart() {
+    if (!canWrite || !localPartForm.name.trim()) return
+    withLocalDb((db) => {
+      db.parts.push({
+        id: nextId(db.meta, 'nextPartId'),
+        name: localPartForm.name.trim(),
+        partNumber: localPartForm.partNumber.trim(),
+        quantity: Number(localPartForm.quantity) || 0,
+        unit: 'each',
+        unitCost: Number(localPartForm.unitCost) || 0,
+        retailPrice: Number(localPartForm.retailPrice) || 0,
+        createdAt: nowIso()
+      })
+    })
+    setLocalPartForm(emptyLocalPart)
+    setStatus('Local part added to this device.')
+    loadLocalAll()
+  }
+
   async function addWorkorder() {
     if (!canWrite || !workorderForm.title.trim()) return
+
+    if (activeMode === 'local') {
+      const created = withLocalDb((db) => {
+        const id = nextId(db.meta, 'nextWorkorderId')
+        const number = workorderForm.number.trim() || `WO-${String(id).padStart(5, '0')}`
+        const record = {
+          id,
+          ...workorderForm,
+          number,
+          customerId: workorderForm.customerId ? Number(workorderForm.customerId) : null,
+          equipmentId: workorderForm.equipmentId ? Number(workorderForm.equipmentId) : null,
+          laborHours: Number(workorderForm.laborHours) || 0,
+          laborRate: Number(workorderForm.laborRate) || 0,
+          laborAccumulatedMs: Number(workorderForm.laborAccumulatedMs) || 0,
+          createdAt: nowIso(),
+          updatedAt: nowIso()
+        }
+        db.workorders.push(record)
+        return record
+      })
+      setSelectedWorkorderId(String(created.id))
+      setActiveTab('diagnose')
+      setStatus(`Workorder ${created.number} saved on this device.`)
+      loadLocalAll()
+      return
+    }
+
     const res = await apiFetch(`${API}/workorders`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -519,6 +970,26 @@ export default function App() {
   async function saveWorkorder() {
     if (!selectedWorkorder) {
       setStatus('Select a workorder first.')
+      return
+    }
+
+    if (activeMode === 'local') {
+      withLocalDb((db) => {
+        const row = db.workorders.find((item) => Number(item.id) === Number(selectedWorkorder.id))
+        if (!row) return
+        Object.assign(row, {
+          ...workorderForm,
+          customerId: workorderForm.customerId ? Number(workorderForm.customerId) : null,
+          equipmentId: workorderForm.equipmentId ? Number(workorderForm.equipmentId) : null,
+          laborHours: Number(workorderForm.laborHours) || 0,
+          laborRate: Number(workorderForm.laborRate) || 0,
+          laborAccumulatedMs: Number(workorderForm.laborAccumulatedMs) || 0,
+          updatedAt: nowIso()
+        })
+      })
+      setStatus(`Saved ${workorderForm.number || selectedWorkorder.number} on this device.`)
+      await loadLocalAll()
+      await loadSelectedWorkorderData(selectedWorkorder.id)
       return
     }
 
@@ -549,6 +1020,42 @@ export default function App() {
       setStatus('Select a workorder and part first.')
       return
     }
+
+    if (activeMode === 'local') {
+      const result = withLocalDb((db) => {
+        const part = db.parts.find((item) => Number(item.id) === Number(partForm.partId))
+        const workorder = db.workorders.find((item) => Number(item.id) === Number(selectedWorkorder.id))
+        if (!part || !workorder) return { error: 'Part or workorder not found.' }
+        const qty = Number(partForm.qty) || 1
+        const qtyUsed = partForm.mode === 'use' ? Math.min(qty, Number(part.quantity || 0)) : 0
+        const qtyReserved = partForm.mode === 'reserve' ? qty : qty
+        part.quantity = Math.max(0, Number(part.quantity || 0) - qtyUsed)
+        db.workorderParts.push({
+          id: nextId(db.meta, 'nextWorkorderPartId'),
+          workorderId: workorder.id,
+          partId: part.id,
+          qtyReserved,
+          qtyUsed,
+          unitCost: Number(part.unitCost || 0),
+          retailPrice: Number(part.retailPrice || 0),
+          note: partForm.note,
+          createdAt: nowIso(),
+          updatedAt: nowIso()
+        })
+        workorder.updatedAt = nowIso()
+        return { actualUsed: qtyUsed }
+      })
+      if (result.error) {
+        setStatus(result.error)
+        return
+      }
+      setPartForm(emptyWorkorderPart)
+      setStatus(partForm.mode === 'use' ? `Used ${result.actualUsed} part(s) on this device.` : 'Part reserved on this device.')
+      await loadLocalAll()
+      await loadSelectedWorkorderData(selectedWorkorder.id)
+      return
+    }
+
     const res = await apiFetch(`${API}/workorders/${selectedWorkorder.id}/parts`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -572,6 +1079,17 @@ export default function App() {
 
   async function removeReservedPart(partRow) {
     if (!partRow || Number(partRow.qtyUsed || 0) > 0) return
+
+    if (activeMode === 'local') {
+      withLocalDb((db) => {
+        db.workorderParts = db.workorderParts.filter((item) => Number(item.id) !== Number(partRow.id))
+      })
+      setStatus('Reserved part removed from this device.')
+      await loadLocalAll()
+      await loadSelectedWorkorderData(selectedWorkorder.id)
+      return
+    }
+
     const res = await apiFetch(`${API}/workorder-parts/${partRow.id}`, { method: 'DELETE' })
     const data = await res.json()
     if (!res.ok) {
@@ -589,6 +1107,30 @@ export default function App() {
     const qty = Number(qtyText || 0)
     if (!qty) return
     const note = window.prompt('Return note (optional):', '') || ''
+
+    if (activeMode === 'local') {
+      const result = withLocalDb((db) => {
+        const row = db.workorderParts.find((item) => Number(item.id) === Number(partRow.id))
+        const part = db.parts.find((item) => Number(item.id) === Number(partRow.partId))
+        if (!row || !part) return { error: 'Part record not found.' }
+        if (Number(row.qtyUsed || 0) < qty) return { error: 'Cannot return more than was used.' }
+        row.qtyUsed = Number(row.qtyUsed || 0) - qty
+        row.qtyReserved = Math.max(0, Number(row.qtyReserved || 0) - qty)
+        row.note = [row.note, note ? `Return: ${note}` : 'Returned to stock'].filter(Boolean).join('\n')
+        row.updatedAt = nowIso()
+        part.quantity = Number(part.quantity || 0) + qty
+        return { qtyReturned: qty }
+      })
+      if (result.error) {
+        setStatus(result.error)
+        return
+      }
+      setStatus(`Returned ${result.qtyReturned} item(s) to local stock.`)
+      await loadLocalAll()
+      await loadSelectedWorkorderData(selectedWorkorder.id)
+      return
+    }
+
     const res = await apiFetch(`${API}/workorder-parts/${partRow.id}/return`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -609,6 +1151,46 @@ export default function App() {
       setStatus('Select a workorder to export.')
       return
     }
+
+    if (activeMode === 'local') {
+      const db = loadLocalDb()
+      const workorder = db.workorders.find((item) => Number(item.id) === Number(selectedWorkorder.id))
+      const customer = db.customers.find((item) => Number(item.id) === Number(workorder?.customerId))
+      const machine = db.equipment.find((item) => Number(item.id) === Number(workorder?.equipmentId))
+      const partRows = db.workorderParts
+        .filter((item) => Number(item.workorderId) === Number(selectedWorkorder.id))
+        .map((row) => ({
+          ...row,
+          partName: db.parts.find((part) => Number(part.id) === Number(row.partId))?.name || 'Unknown part',
+          partNumber: db.parts.find((part) => Number(part.id) === Number(row.partId))?.partNumber || ''
+        }))
+      const html = buildWorkorderHtml(workorder, customer, machine, partRows)
+      if (printAfterOpen) {
+        const printWindow = window.open('', '_blank', 'noopener,noreferrer')
+        if (!printWindow) {
+          setStatus('Popup blocked. Allow popups to print/save PDF.')
+          return
+        }
+        printWindow.document.write(html)
+        printWindow.document.close()
+        printWindow.focus()
+        window.setTimeout(() => printWindow.print(), 400)
+        setStatus('Local print view opened.')
+        return
+      }
+      const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `${selectedWorkorder.number || `WO-${selectedWorkorder.id}`}-workorder.html`.replace(/[^a-zA-Z0-9._-]/g, '-')
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+      setStatus('Local workorder export downloaded.')
+      return
+    }
+
     const res = await apiFetch(`${API}/workorders/${selectedWorkorder.id}/export`)
     if (!res.ok) {
       setStatus('Failed to export workorder.')
@@ -644,6 +1226,20 @@ export default function App() {
 
   async function startTimer() {
     if (!selectedWorkorder) return
+
+    if (activeMode === 'local') {
+      const startedAt = nowIso()
+      withLocalDb((db) => {
+        const row = db.workorders.find((item) => Number(item.id) === Number(selectedWorkorder.id))
+        if (!row || row.laborStartedAt) return
+        row.laborStartedAt = startedAt
+        row.updatedAt = nowIso()
+      })
+      setWorkorderForm((current) => ({ ...current, laborStartedAt: startedAt }))
+      setStatus('Local labor timer started.')
+      return
+    }
+
     const res = await apiFetch(`${API}/workorders/${selectedWorkorder.id}/timer/start`, { method: 'POST' })
     const data = await res.json()
     if (!res.ok) {
@@ -656,6 +1252,30 @@ export default function App() {
 
   async function stopTimer() {
     if (!selectedWorkorder) return
+
+    if (activeMode === 'local') {
+      const elapsedMs = computeLaborMs(workorderForm)
+      const laborHours = Math.max(Number(workorderForm.laborHours || 0), elapsedMs / 3600000)
+      withLocalDb((db) => {
+        const row = db.workorders.find((item) => Number(item.id) === Number(selectedWorkorder.id))
+        if (!row) return
+        row.laborStartedAt = ''
+        row.laborAccumulatedMs = elapsedMs
+        row.laborHours = laborHours
+        row.updatedAt = nowIso()
+      })
+      setWorkorderForm((current) => ({
+        ...current,
+        laborStartedAt: '',
+        laborAccumulatedMs: elapsedMs,
+        laborHours
+      }))
+      setStatus('Local labor timer stopped.')
+      await loadLocalAll()
+      await loadSelectedWorkorderData(selectedWorkorder.id)
+      return
+    }
+
     const res = await apiFetch(`${API}/workorders/${selectedWorkorder.id}/timer/stop`, { method: 'POST' })
     const data = await res.json()
     if (!res.ok) {
@@ -728,7 +1348,7 @@ export default function App() {
       ...current,
       customerSignatureDataUrl: canvas.toDataURL('image/png'),
       customerSignatureName: signatureName.trim(),
-      customerSignedAt: new Date().toISOString()
+      customerSignedAt: nowIso()
     }))
     setIsSignatureDirty(false)
     setStatus('Signature captured. Save workorder to keep it.')
@@ -770,6 +1390,7 @@ export default function App() {
           {currentUser ? (
             <>
               <p>{currentUser.name} ({currentUser.role})</p>
+              <p>{activeMode === 'local' ? 'Using local device storage.' : 'Connected to server.'}</p>
               <button type="button" onClick={logout}>Sign Out</button>
             </>
           ) : (
@@ -790,13 +1411,20 @@ export default function App() {
         </form>
 
         <div className="panel">
-          <h2>Server</h2>
+          <h2>Storage</h2>
+          <label>
+            Mode
+            <select value={storageMode} onChange={(e) => saveStorageMode(e.target.value)}>
+              <option value="auto">Auto (Server if available)</option>
+              <option value="local">Offline / Local device only</option>
+            </select>
+          </label>
           <label>
             Backend URL
             <input value={apiBase} onChange={(e) => setApiBase(e.target.value)} placeholder="http://192.168.1.158:3001" />
           </label>
           <button onClick={saveApiBase}>Save Server URL</button>
-          <p>Android uses the app shell. Windows can install this as a browser app.</p>
+          <p>{activeMode === 'local' ? 'This device is running standalone right now.' : 'This device is using the shared server right now.'}</p>
         </div>
       </section>
 
@@ -837,11 +1465,10 @@ export default function App() {
               <div className="summary-list">
                 <div><span>Total workorders</span><strong>{workorders.length}</strong></div>
                 <div><span>Machines on file</span><strong>{equipment.length}</strong></div>
-                <div><span>Inventory parts linked</span><strong>{parts.length}</strong></div>
+                <div><span>Parts available</span><strong>{parts.length}</strong></div>
                 <div><span>Selected workorder parts</span><strong>{workorderParts.length}</strong></div>
               </div>
             </div>
-
             <div className="panel">
               <h2>Recent Jobs</h2>
               <div className="parts-list">
@@ -853,7 +1480,6 @@ export default function App() {
                 ))}
               </div>
             </div>
-
             <div className="panel wide-panel">
               <h2>Quick Status Message</h2>
               {selectedWorkorder ? (
@@ -1156,6 +1782,35 @@ export default function App() {
                   </div>
                   <button className="primary-action" onClick={addPartToWorkorder}>Add Part</button>
 
+                  {activeMode === 'local' && (
+                    <div className="local-subpanel">
+                      <h2>Local Parts Catalog</h2>
+                      <div className="field-grid">
+                        <label>
+                          Part Name
+                          <input value={localPartForm.name} onChange={(e) => updateForm(setLocalPartForm, 'name', e.target.value)} />
+                        </label>
+                        <label>
+                          Part Number
+                          <input value={localPartForm.partNumber} onChange={(e) => updateForm(setLocalPartForm, 'partNumber', e.target.value)} />
+                        </label>
+                        <label>
+                          Quantity
+                          <input type="number" min="0" value={localPartForm.quantity} onChange={(e) => updateForm(setLocalPartForm, 'quantity', e.target.value)} />
+                        </label>
+                        <label>
+                          Unit Cost
+                          <input type="number" min="0" step="0.01" value={localPartForm.unitCost} onChange={(e) => updateForm(setLocalPartForm, 'unitCost', e.target.value)} />
+                        </label>
+                        <label>
+                          Retail Price
+                          <input type="number" min="0" step="0.01" value={localPartForm.retailPrice} onChange={(e) => updateForm(setLocalPartForm, 'retailPrice', e.target.value)} />
+                        </label>
+                      </div>
+                      <button className="primary-action" onClick={addLocalPart}>Add Local Part</button>
+                    </div>
+                  )}
+
                   <div className="parts-list">
                     {workorderParts.map((item) => (
                       <div key={item.id} className="stacked-row">
@@ -1283,7 +1938,6 @@ export default function App() {
                 <div className="empty-state">Pick or select a customer first.</div>
               )}
             </div>
-
             <div className="panel">
               <h2>Machine History</h2>
               {selectedMachine ? (

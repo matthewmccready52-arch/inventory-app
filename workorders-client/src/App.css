@@ -204,6 +204,13 @@
   gap: 12px;
 }
 
+.local-subpanel {
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+
 .signature-canvas {
   width: 100%;
   max-width: 100%;
