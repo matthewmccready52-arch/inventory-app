@@ -14,6 +14,27 @@
     radial-gradient(circle at top right, rgba(40, 199, 162, 0.09), transparent 340px);
 }
 
+.lock-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 10, 12, 0.78);
+  display: grid;
+  place-items: center;
+  z-index: 20;
+  padding: 16px;
+}
+
+.lock-panel {
+  width: min(420px, 100%);
+  display: grid;
+  gap: 12px;
+  padding: 20px;
+  background: linear-gradient(180deg, var(--surface-raised), var(--surface));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+
 .app-header,
 .work-grid,
 .contact-grid,

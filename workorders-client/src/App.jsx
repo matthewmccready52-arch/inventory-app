@@ -5,6 +5,7 @@ const host = window.location.hostname || 'localhost'
 const defaultApiBase = `http://${host}:3001`
 const LOCAL_DB_KEY = 'workorders:offline-db'
 const LOCAL_MODE_KEY = 'workorders:storageMode'
+const PASSCODE_KEY = 'workorders:appPasscode'
 
 const localUsers = [
   { id: 1, name: 'Owner', role: 'owner', pin: '1234' },
@@ -48,6 +49,7 @@ const emptyWorkorder = {
 }
 const emptyWorkorderPart = { partId: '', qty: 1, mode: 'reserve', note: '' }
 const emptyLocalPart = { name: '', partNumber: '', quantity: 1, unitCost: 0, retailPrice: 0 }
+const emptyPasscodeForm = { passcode: '', confirmPasscode: '' }
 const statusOptions = ['open', 'in progress', 'quote pending', 'waiting parts', 'complete', 'invoiced', 'picked up']
 
 function getSpeechRecognition() {
@@ -153,6 +155,83 @@ function createDefaultLocalDb() {
   }
 }
 
+function ensureLocalDbShape(rawDb) {
+  return {
+    ...createDefaultLocalDb(),
+    ...(rawDb || {}),
+    meta: { ...createDefaultLocalDb().meta, ...(rawDb?.meta || {}) },
+    users: rawDb?.users?.length ? rawDb.users : localUsers,
+    customers: rawDb?.customers || [],
+    equipment: rawDb?.equipment || [],
+    parts: rawDb?.parts || [],
+    workorders: rawDb?.workorders || [],
+    workorderParts: rawDb?.workorderParts || []
+  }
+}
+
+function recalculateMeta(db) {
+  db.meta = {
+    nextCustomerId: Math.max(1, ...db.customers.map((item) => Number(item.id) || 0)) + 1,
+    nextEquipmentId: Math.max(1, ...db.equipment.map((item) => Number(item.id) || 0)) + 1,
+    nextPartId: Math.max(1, ...db.parts.map((item) => Number(item.id) || 0)) + 1,
+    nextWorkorderId: Math.max(1, ...db.workorders.map((item) => Number(item.id) || 0)) + 1,
+    nextWorkorderPartId: Math.max(1, ...db.workorderParts.map((item) => Number(item.id) || 0)) + 1
+  }
+  return db
+}
+
+function mergeImportedDb(baseDb, incomingDb) {
+  const incoming = ensureLocalDbShape(incomingDb)
+  const customerMap = new Map()
+  const equipmentMap = new Map()
+  const partMap = new Map()
+  const workorderMap = new Map()
+
+  for (const customer of incoming.customers) {
+    const next = { ...customer, id: nextId(baseDb.meta, 'nextCustomerId') }
+    customerMap.set(Number(customer.id), next.id)
+    baseDb.customers.push(next)
+  }
+
+  for (const equipment of incoming.equipment) {
+    const next = {
+      ...equipment,
+      id: nextId(baseDb.meta, 'nextEquipmentId'),
+      customerId: equipment.customerId ? customerMap.get(Number(equipment.customerId)) || null : null
+    }
+    equipmentMap.set(Number(equipment.id), next.id)
+    baseDb.equipment.push(next)
+  }
+
+  for (const part of incoming.parts) {
+    const next = { ...part, id: nextId(baseDb.meta, 'nextPartId') }
+    partMap.set(Number(part.id), next.id)
+    baseDb.parts.push(next)
+  }
+
+  for (const workorder of incoming.workorders) {
+    const next = {
+      ...workorder,
+      id: nextId(baseDb.meta, 'nextWorkorderId'),
+      customerId: workorder.customerId ? customerMap.get(Number(workorder.customerId)) || null : null,
+      equipmentId: workorder.equipmentId ? equipmentMap.get(Number(workorder.equipmentId)) || null : null
+    }
+    workorderMap.set(Number(workorder.id), next.id)
+    baseDb.workorders.push(next)
+  }
+
+  for (const row of incoming.workorderParts) {
+    baseDb.workorderParts.push({
+      ...row,
+      id: nextId(baseDb.meta, 'nextWorkorderPartId'),
+      workorderId: workorderMap.get(Number(row.workorderId)) || null,
+      partId: partMap.get(Number(row.partId)) || null
+    })
+  }
+
+  return recalculateMeta(baseDb)
+}
+
 function loadLocalDb() {
   try {
     const raw = localStorage.getItem(LOCAL_DB_KEY)
@@ -161,18 +240,7 @@ function loadLocalDb() {
       localStorage.setItem(LOCAL_DB_KEY, JSON.stringify(fresh))
       return fresh
     }
-    const parsed = JSON.parse(raw)
-    return {
-      ...createDefaultLocalDb(),
-      ...parsed,
-      meta: { ...createDefaultLocalDb().meta, ...(parsed.meta || {}) },
-      users: parsed.users?.length ? parsed.users : localUsers,
-      customers: parsed.customers || [],
-      equipment: parsed.equipment || [],
-      parts: parsed.parts || [],
-      workorders: parsed.workorders || [],
-      workorderParts: parsed.workorderParts || []
-    }
+    return ensureLocalDbShape(JSON.parse(raw))
   } catch {
     const fresh = createDefaultLocalDb()
     localStorage.setItem(LOCAL_DB_KEY, JSON.stringify(fresh))
@@ -421,6 +489,11 @@ export default function App() {
   const [searchText, setSearchText] = useState('')
   const [signatureName, setSignatureName] = useState('')
   const [backendReachable, setBackendReachable] = useState(false)
+  const [appPasscode, setAppPasscode] = useState(() => localStorage.getItem(PASSCODE_KEY) || '')
+  const [isUnlocked, setIsUnlocked] = useState(() => !localStorage.getItem(PASSCODE_KEY))
+  const [unlockPin, setUnlockPin] = useState('')
+  const [passcodeForm, setPasscodeForm] = useState(emptyPasscodeForm)
+  const [importMode, setImportMode] = useState('merge')
   const [currentUser, setCurrentUser] = useState(() => {
     const saved = localStorage.getItem('workorders:currentUser')
     return saved ? JSON.parse(saved) : null
@@ -440,6 +513,7 @@ export default function App() {
   const recognitionRef = useRef(null)
   const signatureCanvasRef = useRef(null)
   const drawingRef = useRef(false)
+  const importFileRef = useRef(null)
   const API = `${apiBase.replace(/\/$/, '')}/api`
   const ASSET_BASE = apiBase.replace(/\/$/, '')
   const activeMode = storageMode === 'local' || !backendReachable ? 'local' : 'server'
@@ -749,6 +823,113 @@ export default function App() {
       setStatus('Offline mode enabled. Using local device storage.')
     } else {
       setStatus('Auto mode enabled. The app will use the server when available.')
+    }
+  }
+
+  function lockAppNow() {
+    if (!appPasscode) {
+      setStatus('Set an app passcode first.')
+      return
+    }
+    setIsUnlocked(false)
+    setUnlockPin('')
+    setStatus('App locked.')
+  }
+
+  function unlockApp(event) {
+    event.preventDefault()
+    if (!appPasscode) {
+      setIsUnlocked(true)
+      return
+    }
+    if (unlockPin !== appPasscode) {
+      setStatus('Wrong app passcode.')
+      return
+    }
+    setIsUnlocked(true)
+    setUnlockPin('')
+    setStatus('App unlocked.')
+  }
+
+  function saveAppPasscode() {
+    const nextPasscode = passcodeForm.passcode.trim()
+    if (!/^\d{4,8}$/.test(nextPasscode)) {
+      setStatus('Use a 4 to 8 digit app passcode.')
+      return
+    }
+    if (nextPasscode !== passcodeForm.confirmPasscode.trim()) {
+      setStatus('Passcode confirmation does not match.')
+      return
+    }
+    localStorage.setItem(PASSCODE_KEY, nextPasscode)
+    setAppPasscode(nextPasscode)
+    setPasscodeForm(emptyPasscodeForm)
+    setIsUnlocked(true)
+    setStatus('App passcode saved.')
+  }
+
+  function clearAppPasscode() {
+    if (!appPasscode) {
+      setStatus('No app passcode is set.')
+      return
+    }
+    const entered = window.prompt('Enter the current app passcode to remove it:', '') || ''
+    if (entered !== appPasscode) {
+      setStatus('Passcode was not removed.')
+      return
+    }
+    localStorage.removeItem(PASSCODE_KEY)
+    setAppPasscode('')
+    setIsUnlocked(true)
+    setUnlockPin('')
+    setStatus('App passcode removed.')
+  }
+
+  function exportLocalBackup() {
+    const payload = {
+      version: 1,
+      exportedAt: nowIso(),
+      source: 'workorders-client-local',
+      data: recalculateMeta(ensureLocalDbShape(loadLocalDb()))
+    }
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `workorders-local-backup-${new Date().toISOString().slice(0, 10)}.json`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+    setStatus('Local backup exported.')
+  }
+
+  function openImportPicker() {
+    importFileRef.current?.click()
+  }
+
+  async function importLocalBackup(event) {
+    const file = event.target.files?.[0]
+    if (!file) return
+    try {
+      const text = await file.text()
+      const parsed = JSON.parse(text)
+      const importedData = ensureLocalDbShape(parsed?.data || parsed)
+      if (importMode === 'replace') {
+        saveLocalDb(recalculateMeta(importedData))
+        setStatus('Local backup restored with replace mode.')
+      } else {
+        const merged = withLocalDb((db) => mergeImportedDb(db, importedData))
+        saveLocalDb(merged)
+        setStatus('Local backup imported with merge mode.')
+      }
+      setSelectedWorkorderId('')
+      setSelectedCustomerId('')
+      await loadLocalAll()
+    } catch {
+      setStatus('Could not import that backup file.')
+    } finally {
+      event.target.value = ''
     }
   }
 
@@ -1369,6 +1550,32 @@ export default function App() {
 
   return (
     <main className="workorders-shell">
+      <input
+        ref={importFileRef}
+        type="file"
+        accept="application/json"
+        onChange={importLocalBackup}
+        style={{ display: 'none' }}
+      />
+      {appPasscode && !isUnlocked && (
+        <div className="lock-overlay">
+          <form className="lock-panel" onSubmit={unlockApp}>
+            <h2>App Locked</h2>
+            <p>Enter the device passcode to open Workorders.</p>
+            <label>
+              App Passcode
+              <input
+                type="password"
+                inputMode="numeric"
+                value={unlockPin}
+                onChange={(e) => setUnlockPin(e.target.value)}
+                autoFocus
+              />
+            </label>
+            <button className="primary-action" type="submit">Unlock</button>
+          </form>
+        </div>
+      )}
       <header className="app-header">
         <div>
           <p className="eyebrow">Workorders</p>
@@ -1425,6 +1632,49 @@ export default function App() {
           </label>
           <button onClick={saveApiBase}>Save Server URL</button>
           <p>{activeMode === 'local' ? 'This device is running standalone right now.' : 'This device is using the shared server right now.'}</p>
+          <div className="local-subpanel">
+            <h2>Backup & Restore</h2>
+            <label>
+              Import Mode
+              <select value={importMode} onChange={(e) => setImportMode(e.target.value)}>
+                <option value="merge">Merge Into Local Data</option>
+                <option value="replace">Replace Local Data</option>
+              </select>
+            </label>
+            <div className="inline-actions">
+              <button type="button" onClick={exportLocalBackup}>Export Local Backup</button>
+              <button type="button" onClick={openImportPicker}>Import Backup</button>
+            </div>
+          </div>
+          <div className="local-subpanel">
+            <h2>App Lock</h2>
+            <div className="field-grid">
+              <label>
+                New Passcode
+                <input
+                  type="password"
+                  inputMode="numeric"
+                  value={passcodeForm.passcode}
+                  onChange={(e) => updateForm(setPasscodeForm, 'passcode', e.target.value)}
+                  placeholder="4 to 8 digits"
+                />
+              </label>
+              <label>
+                Confirm Passcode
+                <input
+                  type="password"
+                  inputMode="numeric"
+                  value={passcodeForm.confirmPasscode}
+                  onChange={(e) => updateForm(setPasscodeForm, 'confirmPasscode', e.target.value)}
+                />
+              </label>
+            </div>
+            <div className="inline-actions">
+              <button type="button" className="primary-action" onClick={saveAppPasscode}>Save App Passcode</button>
+              <button type="button" onClick={lockAppNow}>Lock Now</button>
+              <button type="button" onClick={clearAppPasscode}>Remove Passcode</button>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -1907,7 +2157,7 @@ export default function App() {
                   <div className="inline-actions">
                     <button className="primary-action" onClick={saveWorkorder}>Save Workorder</button>
                     <button onClick={() => exportSelectedWorkorder(false)}>Export for Email</button>
-                    <button onClick={() => exportSelectedWorkorder(true)}>Print / Save PDF</button>
+                    <button onClick={() => exportSelectedWorkorder(true)}>Open PDF Print View</button>
                   </div>
                 </>
               ) : (
