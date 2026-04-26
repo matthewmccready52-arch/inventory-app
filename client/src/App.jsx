@@ -8,6 +8,7 @@ const defaultApiBase = `http://${host}:3001`
 const LOCAL_DB_KEY = 'inventory:offline-db'
 const LOCAL_MODE_KEY = 'inventory:storageMode'
 const PASSCODE_KEY = 'inventory:appPasscode'
+const BUSINESS_SETTINGS_KEY = 'inventory:businessSettings'
 
 const localUsers = [
   { id: 1, name: 'Owner', role: 'owner', pin: '1234', active: 1 },
@@ -90,9 +91,28 @@ const emptyWorkorderForm = {
 }
 const emptyWorkorderPartForm = { workorderId: '', partId: '', qty: 1, mode: 'reserve', note: '' }
 const emptyPasscodeForm = { passcode: '', confirmPasscode: '' }
+const defaultBusinessSettings = {
+  shopName: '',
+  phone: '',
+  email: '',
+  address: '',
+  taxRate: 0,
+  laborRateDefault: 95,
+  quoteTerms: 'Please approve any additional work before we continue.',
+  invoiceFooter: 'Thank you for your business.'
+}
 
 function nowIso() {
   return new Date().toISOString()
+}
+
+function normalizeBusinessSettings(rawSettings) {
+  return {
+    ...defaultBusinessSettings,
+    ...(rawSettings || {}),
+    taxRate: Number(rawSettings?.taxRate) || 0,
+    laborRateDefault: Number(rawSettings?.laborRateDefault) || defaultBusinessSettings.laborRateDefault
+  }
 }
 
 function createDefaultLocalDb() {
@@ -300,6 +320,13 @@ function mergeImportedDb(baseDb, incomingRaw) {
 }
 
 export default function App() {
+  const [businessSettings, setBusinessSettings] = useState(() => {
+    try {
+      return normalizeBusinessSettings(JSON.parse(localStorage.getItem(BUSINESS_SETTINGS_KEY) || '{}'))
+    } catch {
+      return normalizeBusinessSettings({})
+    }
+  })
   const [parts, setParts] = useState([])
   const [locations, setLocations] = useState([])
   const [categories, setCategories] = useState([])
@@ -1595,16 +1622,18 @@ export default function App() {
   function downloadBackup() {
     if (activeMode === 'local') {
       const payload = {
-        version: 1,
+        type: 'shop-suite-bundle',
+        version: 2,
         exportedAt: nowIso(),
         source: 'inventory-local',
-        data: recalculateMeta(ensureLocalDbShape(loadLocalDb()))
+        businessSettings: normalizeBusinessSettings(businessSettings),
+        inventoryData: recalculateMeta(ensureLocalDbShape(loadLocalDb()))
       }
       const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' })
       const url = URL.createObjectURL(blob)
       const link = document.createElement('a')
       link.href = url
-      link.download = `inventory-local-backup-${new Date().toISOString().slice(0, 10)}.json`
+      link.download = `shop-transfer-package-${new Date().toISOString().slice(0, 10)}.json`
       document.body.appendChild(link)
       link.click()
       link.remove()
@@ -1612,7 +1641,7 @@ export default function App() {
       const now = nowIso()
       localStorage.setItem('inventory:lastBackupAt', now)
       setLastBackupAt(now)
-      setStatus('Local backup downloaded.')
+      setStatus('Transfer package downloaded.')
       return
     }
     const now = new Date().toISOString()
@@ -1629,15 +1658,20 @@ export default function App() {
       reader.onload = () => {
         try {
           const parsed = JSON.parse(String(reader.result || '{}'))
-          const imported = ensureLocalDbShape(parsed?.data || parsed)
+          if (parsed?.businessSettings) {
+            const next = normalizeBusinessSettings(parsed.businessSettings)
+            localStorage.setItem(BUSINESS_SETTINGS_KEY, JSON.stringify(next))
+            setBusinessSettings(next)
+          }
+          const imported = ensureLocalDbShape(parsed?.inventoryData || parsed?.workordersData || parsed?.data || parsed)
           if (importMode === 'replace') {
             saveLocalDb(recalculateMeta(imported))
-            setStatus('Local backup restored.')
+            setStatus('Transfer package restored.')
           } else {
             const db = loadLocalDb()
             const merged = mergeImportedDb(db, imported)
             saveLocalDb(merged)
-            setStatus('Local backup imported and merged.')
+            setStatus('Transfer package imported and merged.')
           }
           const now = nowIso()
           localStorage.setItem('inventory:lastBackupAt', now)
@@ -1830,6 +1864,13 @@ export default function App() {
     localStorage.setItem('inventory:apiBase', cleaned)
     setApiBase(cleaned)
     setStatus(`Server URL saved: ${cleaned}`)
+  }
+
+  function saveBusinessProfile() {
+    const next = normalizeBusinessSettings(businessSettings)
+    localStorage.setItem(BUSINESS_SETTINGS_KEY, JSON.stringify(next))
+    setBusinessSettings(next)
+    setStatus('Business settings saved for this device.')
   }
 
   function saveStorageMode(nextMode) {
@@ -2103,9 +2144,9 @@ export default function App() {
         <div className="ops-actions">
           <button onClick={downloadPartsCsv}>Export CSV</button>
           <button onClick={downloadLowStockCsv}>Export Low Stock</button>
-          <button onClick={downloadBackup}>{activeMode === 'local' ? 'Export Local Backup' : 'Download Backup'}</button>
+          <button onClick={downloadBackup}>{activeMode === 'local' ? 'Export Transfer Package' : 'Download Backup'}</button>
           {activeMode === 'local' ? (
-            <button onClick={() => importFileRef.current?.click()}>Import Local Backup</button>
+            <button onClick={() => importFileRef.current?.click()}>Import Transfer Package</button>
           ) : (
             <label className="restore-picker">
               Restore DB
@@ -2871,6 +2912,52 @@ export default function App() {
 
       {activeTab === 'admin' && (
       <>
+      <section className="import-panel">
+        <div className="panel-title-row">
+          <div>
+            <h2>Business Settings</h2>
+            <p>Used in transfer packages now, and ready for cleaner quotes and invoices next.</p>
+          </div>
+        </div>
+        <div className="field-grid">
+          <label>
+            Shop Name
+            <input value={businessSettings.shopName} onChange={(e) => setBusinessSettings((current) => ({ ...current, shopName: e.target.value }))} />
+          </label>
+          <label>
+            Phone
+            <input value={businessSettings.phone} onChange={(e) => setBusinessSettings((current) => ({ ...current, phone: e.target.value }))} />
+          </label>
+          <label>
+            Email
+            <input value={businessSettings.email} onChange={(e) => setBusinessSettings((current) => ({ ...current, email: e.target.value }))} />
+          </label>
+          <label>
+            Default Labor Rate
+            <input type="number" min="0" step="0.01" value={businessSettings.laborRateDefault} onChange={(e) => setBusinessSettings((current) => ({ ...current, laborRateDefault: e.target.value }))} />
+          </label>
+          <label className="full-field">
+            Address
+            <textarea value={businessSettings.address} onChange={(e) => setBusinessSettings((current) => ({ ...current, address: e.target.value }))} />
+          </label>
+          <label>
+            Tax Rate %
+            <input type="number" min="0" step="0.01" value={businessSettings.taxRate} onChange={(e) => setBusinessSettings((current) => ({ ...current, taxRate: e.target.value }))} />
+          </label>
+          <label className="full-field">
+            Quote Terms
+            <textarea value={businessSettings.quoteTerms} onChange={(e) => setBusinessSettings((current) => ({ ...current, quoteTerms: e.target.value }))} />
+          </label>
+          <label className="full-field">
+            Invoice Footer
+            <textarea value={businessSettings.invoiceFooter} onChange={(e) => setBusinessSettings((current) => ({ ...current, invoiceFooter: e.target.value }))} />
+          </label>
+        </div>
+        <div className="ops-actions">
+          <button className="primary-action" onClick={saveBusinessProfile}>Save Business Settings</button>
+        </div>
+      </section>
+
       <section className="manage-grid">
         <div>
           <h2>Categories</h2>

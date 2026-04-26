@@ -6,6 +6,7 @@ const defaultApiBase = `http://${host}:3001`
 const LOCAL_DB_KEY = 'workorders:offline-db'
 const LOCAL_MODE_KEY = 'workorders:storageMode'
 const PASSCODE_KEY = 'workorders:appPasscode'
+const BUSINESS_SETTINGS_KEY = 'workorders:businessSettings'
 
 const localUsers = [
   { id: 1, name: 'Owner', role: 'owner', pin: '1234' },
@@ -38,6 +39,12 @@ const emptyWorkorder = {
   equipmentId: '',
   complaint: '',
   diagnosis: '',
+  estimateNotes: '',
+  approvalStatus: 'pending',
+  approvalMethod: '',
+  approvalLimit: '',
+  approvedBy: '',
+  approvedAt: '',
   laborNotes: '',
   laborHours: 0,
   laborRate: 0,
@@ -51,6 +58,16 @@ const emptyWorkorderPart = { partId: '', qty: 1, mode: 'reserve', note: '' }
 const emptyLocalPart = { name: '', partNumber: '', quantity: 1, unitCost: 0, retailPrice: 0 }
 const emptyPasscodeForm = { passcode: '', confirmPasscode: '' }
 const statusOptions = ['open', 'in progress', 'quote pending', 'waiting parts', 'complete', 'invoiced', 'picked up']
+const defaultBusinessSettings = {
+  shopName: '',
+  phone: '',
+  email: '',
+  address: '',
+  taxRate: 0,
+  laborRateDefault: 95,
+  quoteTerms: 'Please approve any additional work before we continue.',
+  invoiceFooter: 'Thank you for your business.'
+}
 
 function getSpeechRecognition() {
   return window.SpeechRecognition || window.webkitSpeechRecognition || null
@@ -78,6 +95,12 @@ function normalizeWorkorderForForm(workorder) {
     equipmentId: workorder.equipmentId ? String(workorder.equipmentId) : '',
     complaint: workorder.complaint || '',
     diagnosis: workorder.diagnosis || '',
+    estimateNotes: workorder.estimateNotes || '',
+    approvalStatus: workorder.approvalStatus || 'pending',
+    approvalMethod: workorder.approvalMethod || '',
+    approvalLimit: workorder.approvalLimit === null || workorder.approvalLimit === undefined ? '' : String(workorder.approvalLimit),
+    approvedBy: workorder.approvedBy || '',
+    approvedAt: workorder.approvedAt || '',
     laborNotes: workorder.laborNotes || '',
     laborHours: Number(workorder.laborHours || 0),
     laborRate: Number(workorder.laborRate || 0),
@@ -135,6 +158,15 @@ function htmlEscape(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;')
+}
+
+function normalizeBusinessSettings(rawSettings) {
+  return {
+    ...defaultBusinessSettings,
+    ...(rawSettings || {}),
+    taxRate: Number(rawSettings?.taxRate) || 0,
+    laborRateDefault: Number(rawSettings?.laborRateDefault) || defaultBusinessSettings.laborRateDefault
+  }
 }
 
 function createDefaultLocalDb() {
@@ -259,6 +291,37 @@ function withLocalDb(mutator) {
   return result
 }
 
+function loadBusinessSettings() {
+  try {
+    return normalizeBusinessSettings(JSON.parse(localStorage.getItem(BUSINESS_SETTINGS_KEY) || '{}'))
+  } catch {
+    return normalizeBusinessSettings({})
+  }
+}
+
+function saveBusinessSettings(nextSettings) {
+  localStorage.setItem(BUSINESS_SETTINGS_KEY, JSON.stringify(normalizeBusinessSettings(nextSettings)))
+}
+
+function extractWorkordersDb(rawSource) {
+  const source = rawSource || {}
+  return ensureLocalDbShape({
+    customers: source.customers || [],
+    equipment: source.equipment || [],
+    parts: (source.parts || []).map((part) => ({
+      id: part.id,
+      name: part.name || '',
+      partNumber: part.partNumber || '',
+      quantity: Number(part.quantity || 0),
+      unit: part.unit || 'each',
+      unitCost: Number(part.unitCost || 0),
+      retailPrice: Number(part.retailPrice || 0)
+    })),
+    workorders: source.workorders || [],
+    workorderParts: source.workorderParts || []
+  })
+}
+
 function getReservedQtyForPart(db, partId) {
   return db.workorderParts.reduce((sum, row) => sum + Math.max(0, Number(row.partId) === Number(partId) ? Number(row.qtyReserved || 0) - Number(row.qtyUsed || 0) : 0), 0)
 }
@@ -355,12 +418,15 @@ function nowIso() {
   return new Date().toISOString()
 }
 
-function buildWorkorderHtml(workorder, customer, machine, partRows, originLabel = 'Local device storage') {
+function buildWorkorderHtml(workorder, customer, machine, partRows, settings, originLabel = 'Local device storage') {
+  const business = normalizeBusinessSettings(settings)
   const partsRetail = partRows.reduce((sum, row) => sum + Number(row.qtyUsed || 0) * Number(row.retailPrice || 0), 0)
   const partsCost = partRows.reduce((sum, row) => sum + Number(row.qtyUsed || 0) * Number(row.unitCost || 0), 0)
   const billedLaborHours = Math.max(Number(workorder.laborHours || 0), computeLaborMs(workorder) / 3600000)
   const laborTotal = billedLaborHours * Number(workorder.laborRate || 0)
-  const grandTotal = partsRetail + laborTotal
+  const subtotal = partsRetail + laborTotal
+  const taxTotal = subtotal * (Number(business.taxRate || 0) / 100)
+  const grandTotal = subtotal + taxTotal
   const partsRows = partRows.length
     ? partRows.map((part) => `
       <tr>
@@ -387,6 +453,16 @@ function buildWorkorderHtml(workorder, customer, machine, partRows, originLabel 
         <div class="signature-meta">${htmlEscape(workorder.customerSignedAt || '')}</div>
       </div>`
     : '<div class="line">Customer Signature</div>'
+
+  const approvalRows = [
+    ['Approval', workorder.approvalStatus || 'pending'],
+    ['Approved By', workorder.approvedBy || ''],
+    ['Method', workorder.approvalMethod || ''],
+    ['Approved At', workorder.approvedAt || ''],
+    ['Limit', workorder.approvalLimit ? formatCurrency(workorder.approvalLimit) : '']
+  ].filter(([, value]) => value)
+
+  const headerContact = [business.phone, business.email].filter(Boolean).join(' | ')
 
   return `<!doctype html>
 <html>
@@ -421,7 +497,10 @@ function buildWorkorderHtml(workorder, customer, machine, partRows, originLabel 
 <body>
   <header>
     <div>
-      <h1>Work Order / Invoice Draft</h1>
+      <h1>${htmlEscape(business.shopName || 'Work Order / Invoice Draft')}</h1>
+      ${business.shopName ? '<p class="muted">Work Order / Invoice Draft</p>' : ''}
+      ${business.address ? `<p class="muted">${htmlEscape(business.address)}</p>` : ''}
+      ${headerContact ? `<p class="muted">${htmlEscape(headerContact)}</p>` : ''}
       <p class="muted">Generated ${htmlEscape(new Date().toLocaleString())}</p>
       <p class="muted">${htmlEscape(originLabel)}</p>
     </div>
@@ -451,6 +530,12 @@ function buildWorkorderHtml(workorder, customer, machine, partRows, originLabel 
   </section>
   <h2>Drop-Off / Complaint</h2>
   <div class="box">${htmlEscape(workorder.complaint || '').replace(/\n/g, '<br>') || 'No complaint recorded.'}</div>
+  <h2>Quote / Authorization</h2>
+  <div class="box">
+    ${workorder.estimateNotes ? `<p>${htmlEscape(workorder.estimateNotes).replace(/\n/g, '<br>')}</p>` : '<p>No quote notes recorded.</p>'}
+    ${approvalRows.length ? `<table><tbody>${approvalRows.map(([label, value]) => `<tr><th>${htmlEscape(label)}</th><td>${htmlEscape(value)}</td></tr>`).join('')}</tbody></table>` : ''}
+    ${business.quoteTerms ? `<p class="muted">${htmlEscape(business.quoteTerms)}</p>` : ''}
+  </div>
   <h2>Diagnosis / Work Notes</h2>
   <div class="box">${htmlEscape(workorder.diagnosis || workorder.laborNotes || '').replace(/\n/g, '<br>') || 'No notes recorded.'}</div>
   ${photos ? `<h2>Machine Intake Photos</h2><div class="photos">${photos}</div>` : ''}
@@ -463,9 +548,12 @@ function buildWorkorderHtml(workorder, customer, machine, partRows, originLabel 
   <div class="totals">
     <div><span>Parts Retail</span><strong>${formatCurrency(partsRetail)}</strong></div>
     <div><span>Labor (${htmlEscape(billedLaborHours.toFixed(2))} hrs @ ${formatCurrency(workorder.laborRate)})</span><strong>${formatCurrency(laborTotal)}</strong></div>
+    <div><span>Subtotal</span><strong>${formatCurrency(subtotal)}</strong></div>
+    <div><span>Tax (${htmlEscape(String(Number(business.taxRate || 0).toFixed(2)))}%)</span><strong>${formatCurrency(taxTotal)}</strong></div>
     <div><span>Parts Cost</span><span>${formatCurrency(partsCost)}</span></div>
     <div class="grand"><span>Total</span><strong>${formatCurrency(grandTotal)}</strong></div>
   </div>
+  ${business.invoiceFooter ? `<p class="muted">${htmlEscape(business.invoiceFooter)}</p>` : ''}
   <div class="signatures">
     ${signatureBlock}
     <div class="line">Technician</div>
@@ -477,6 +565,7 @@ function buildWorkorderHtml(workorder, customer, machine, partRows, originLabel 
 export default function App() {
   const [apiBase, setApiBase] = useState(() => localStorage.getItem('workorders:apiBase') || defaultApiBase)
   const [storageMode, setStorageMode] = useState(() => localStorage.getItem(LOCAL_MODE_KEY) || 'auto')
+  const [businessSettings, setBusinessSettings] = useState(() => loadBusinessSettings())
   const [status, setStatus] = useState('')
   const [users, setUsers] = useState([])
   const [customers, setCustomers] = useState([])
@@ -709,8 +798,10 @@ export default function App() {
     const timerHours = activeTimerMs / 3600000
     const laborHours = Math.max(Number(workorderForm.laborHours || 0), timerHours)
     const labor = laborHours * Number(workorderForm.laborRate || 0)
-    return { partsRetail, laborHours, labor, total: partsRetail + labor }
-  }, [activeTimerMs, workorderForm.laborHours, workorderForm.laborRate, workorderParts])
+    const subtotal = partsRetail + labor
+    const tax = subtotal * (Number(businessSettings.taxRate || 0) / 100)
+    return { partsRetail, laborHours, labor, subtotal, tax, total: subtotal + tax }
+  }, [activeTimerMs, businessSettings.taxRate, workorderForm.laborHours, workorderForm.laborRate, workorderParts])
 
   useEffect(() => {
     if (!workorderForm.laborStartedAt) return undefined
@@ -815,6 +906,13 @@ export default function App() {
     setStatus(`Server URL saved: ${cleaned}`)
   }
 
+  function saveBusinessProfile() {
+    const next = normalizeBusinessSettings(businessSettings)
+    saveBusinessSettings(next)
+    setBusinessSettings(next)
+    setStatus('Business settings saved for this device.')
+  }
+
   function saveStorageMode(nextMode) {
     localStorage.setItem(LOCAL_MODE_KEY, nextMode)
     setStorageMode(nextMode)
@@ -887,21 +985,23 @@ export default function App() {
 
   function exportLocalBackup() {
     const payload = {
-      version: 1,
+      type: 'shop-suite-bundle',
+      version: 2,
       exportedAt: nowIso(),
       source: 'workorders-client-local',
-      data: recalculateMeta(ensureLocalDbShape(loadLocalDb()))
+      businessSettings: normalizeBusinessSettings(businessSettings),
+      workordersData: recalculateMeta(ensureLocalDbShape(loadLocalDb()))
     }
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
-    link.download = `workorders-local-backup-${new Date().toISOString().slice(0, 10)}.json`
+    link.download = `workorders-transfer-package-${new Date().toISOString().slice(0, 10)}.json`
     document.body.appendChild(link)
     link.click()
     link.remove()
     URL.revokeObjectURL(url)
-    setStatus('Local backup exported.')
+    setStatus('Transfer package exported.')
   }
 
   function openImportPicker() {
@@ -914,14 +1014,23 @@ export default function App() {
     try {
       const text = await file.text()
       const parsed = JSON.parse(text)
-      const importedData = ensureLocalDbShape(parsed?.data || parsed)
+      const importedSettings = parsed?.businessSettings ? normalizeBusinessSettings(parsed.businessSettings) : null
+      if (importedSettings) {
+        saveBusinessSettings(importedSettings)
+        setBusinessSettings(importedSettings)
+      }
+      const importedData = parsed?.workordersData
+        ? ensureLocalDbShape(parsed.workordersData)
+        : parsed?.inventoryData
+          ? extractWorkordersDb(parsed.inventoryData)
+          : ensureLocalDbShape(parsed?.data || parsed)
       if (importMode === 'replace') {
         saveLocalDb(recalculateMeta(importedData))
-        setStatus('Local backup restored with replace mode.')
+        setStatus('Transfer package restored with replace mode.')
       } else {
         const merged = withLocalDb((db) => mergeImportedDb(db, importedData))
         saveLocalDb(merged)
-        setStatus('Local backup imported with merge mode.')
+        setStatus('Transfer package imported with merge mode.')
       }
       setSelectedWorkorderId('')
       setSelectedCustomerId('')
@@ -1111,7 +1220,8 @@ export default function App() {
           customerId: workorderForm.customerId ? Number(workorderForm.customerId) : null,
           equipmentId: workorderForm.equipmentId ? Number(workorderForm.equipmentId) : null,
           laborHours: Number(workorderForm.laborHours) || 0,
-          laborRate: Number(workorderForm.laborRate) || 0,
+          laborRate: Number(workorderForm.laborRate) || Number(businessSettings.laborRateDefault) || 0,
+          approvalLimit: Number(workorderForm.approvalLimit) || 0,
           laborAccumulatedMs: Number(workorderForm.laborAccumulatedMs) || 0,
           createdAt: nowIso(),
           updatedAt: nowIso()
@@ -1134,7 +1244,8 @@ export default function App() {
         customerId: workorderForm.customerId ? Number(workorderForm.customerId) : null,
         equipmentId: workorderForm.equipmentId ? Number(workorderForm.equipmentId) : null,
         laborHours: Number(workorderForm.laborHours) || 0,
-        laborRate: Number(workorderForm.laborRate) || 0
+        laborRate: Number(workorderForm.laborRate) || Number(businessSettings.laborRateDefault) || 0,
+        approvalLimit: Number(workorderForm.approvalLimit) || 0
       })
     })
     const data = await res.json()
@@ -1163,7 +1274,8 @@ export default function App() {
           customerId: workorderForm.customerId ? Number(workorderForm.customerId) : null,
           equipmentId: workorderForm.equipmentId ? Number(workorderForm.equipmentId) : null,
           laborHours: Number(workorderForm.laborHours) || 0,
-          laborRate: Number(workorderForm.laborRate) || 0,
+          laborRate: Number(workorderForm.laborRate) || Number(businessSettings.laborRateDefault) || 0,
+          approvalLimit: Number(workorderForm.approvalLimit) || 0,
           laborAccumulatedMs: Number(workorderForm.laborAccumulatedMs) || 0,
           updatedAt: nowIso()
         })
@@ -1182,7 +1294,8 @@ export default function App() {
         customerId: workorderForm.customerId ? Number(workorderForm.customerId) : null,
         equipmentId: workorderForm.equipmentId ? Number(workorderForm.equipmentId) : null,
         laborHours: Number(workorderForm.laborHours) || 0,
-        laborRate: Number(workorderForm.laborRate) || 0,
+        laborRate: Number(workorderForm.laborRate) || Number(businessSettings.laborRateDefault) || 0,
+        approvalLimit: Number(workorderForm.approvalLimit) || 0,
         laborAccumulatedMs: Number(workorderForm.laborAccumulatedMs) || 0
       })
     })
@@ -1332,54 +1445,15 @@ export default function App() {
       setStatus('Select a workorder to export.')
       return
     }
-
-    if (activeMode === 'local') {
-      const db = loadLocalDb()
-      const workorder = db.workorders.find((item) => Number(item.id) === Number(selectedWorkorder.id))
-      const customer = db.customers.find((item) => Number(item.id) === Number(workorder?.customerId))
-      const machine = db.equipment.find((item) => Number(item.id) === Number(workorder?.equipmentId))
-      const partRows = db.workorderParts
-        .filter((item) => Number(item.workorderId) === Number(selectedWorkorder.id))
-        .map((row) => ({
-          ...row,
-          partName: db.parts.find((part) => Number(part.id) === Number(row.partId))?.name || 'Unknown part',
-          partNumber: db.parts.find((part) => Number(part.id) === Number(row.partId))?.partNumber || ''
-        }))
-      const html = buildWorkorderHtml(workorder, customer, machine, partRows)
-      if (printAfterOpen) {
-        const printWindow = window.open('', '_blank', 'noopener,noreferrer')
-        if (!printWindow) {
-          setStatus('Popup blocked. Allow popups to print/save PDF.')
-          return
-        }
-        printWindow.document.write(html)
-        printWindow.document.close()
-        printWindow.focus()
-        window.setTimeout(() => printWindow.print(), 400)
-        setStatus('Local print view opened.')
-        return
-      }
-      const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
-      const url = URL.createObjectURL(blob)
-      const link = document.createElement('a')
-      link.href = url
-      link.download = `${selectedWorkorder.number || `WO-${selectedWorkorder.id}`}-workorder.html`.replace(/[^a-zA-Z0-9._-]/g, '-')
-      document.body.appendChild(link)
-      link.click()
-      link.remove()
-      URL.revokeObjectURL(url)
-      setStatus('Local workorder export downloaded.')
-      return
-    }
-
-    const res = await apiFetch(`${API}/workorders/${selectedWorkorder.id}/export`)
-    if (!res.ok) {
-      setStatus('Failed to export workorder.')
-      return
-    }
-
+    const html = buildWorkorderHtml(
+      { ...selectedWorkorder, ...workorderForm },
+      selectedCustomer,
+      selectedMachine,
+      workorderParts,
+      businessSettings,
+      activeMode === 'local' ? 'Local device storage' : 'Shared server data'
+    )
     if (printAfterOpen) {
-      const html = await res.text()
       const printWindow = window.open('', '_blank', 'noopener,noreferrer')
       if (!printWindow) {
         setStatus('Popup blocked. Allow popups to print/save PDF.')
@@ -1389,11 +1463,11 @@ export default function App() {
       printWindow.document.close()
       printWindow.focus()
       window.setTimeout(() => printWindow.print(), 400)
-      setStatus('Print view opened.')
+      setStatus(activeMode === 'local' ? 'Local print view opened.' : 'Print view opened.')
       return
     }
 
-    const blob = await res.blob()
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
@@ -1402,7 +1476,7 @@ export default function App() {
     link.click()
     link.remove()
     URL.revokeObjectURL(url)
-    setStatus('Workorder export downloaded.')
+    setStatus(activeMode === 'local' ? 'Local workorder export downloaded.' : 'Workorder export downloaded.')
   }
 
   async function startTimer() {
@@ -1535,6 +1609,17 @@ export default function App() {
     setStatus('Signature captured. Save workorder to keep it.')
   }
 
+  function markQuoteApprovedNow() {
+    setWorkorderForm((current) => ({
+      ...current,
+      approvalStatus: 'approved',
+      approvedAt: nowIso(),
+      approvedBy: current.approvedBy || signatureName || selectedCustomer?.name || '',
+      approvalMethod: current.approvalMethod || 'in person'
+    }))
+    setStatus('Quote marked approved. Save workorder to keep it.')
+  }
+
   async function copyStatusUpdate() {
     if (!selectedWorkorder) return
     const lines = [
@@ -1634,6 +1719,7 @@ export default function App() {
           <p>{activeMode === 'local' ? 'This device is running standalone right now.' : 'This device is using the shared server right now.'}</p>
           <div className="local-subpanel">
             <h2>Backup & Restore</h2>
+            <p>Export a transfer package, send it to another phone or PC, then import it there.</p>
             <label>
               Import Mode
               <select value={importMode} onChange={(e) => setImportMode(e.target.value)}>
@@ -1642,9 +1728,47 @@ export default function App() {
               </select>
             </label>
             <div className="inline-actions">
-              <button type="button" onClick={exportLocalBackup}>Export Local Backup</button>
-              <button type="button" onClick={openImportPicker}>Import Backup</button>
+              <button type="button" onClick={exportLocalBackup}>Export Transfer Package</button>
+              <button type="button" onClick={openImportPicker}>Import Transfer Package</button>
             </div>
+          </div>
+          <div className="local-subpanel">
+            <h2>Business Settings</h2>
+            <div className="field-grid">
+              <label>
+                Shop Name
+                <input value={businessSettings.shopName} onChange={(e) => updateForm(setBusinessSettings, 'shopName', e.target.value)} />
+              </label>
+              <label>
+                Phone
+                <input value={businessSettings.phone} onChange={(e) => updateForm(setBusinessSettings, 'phone', e.target.value)} />
+              </label>
+              <label>
+                Email
+                <input value={businessSettings.email} onChange={(e) => updateForm(setBusinessSettings, 'email', e.target.value)} />
+              </label>
+              <label>
+                Default Labor Rate
+                <input type="number" min="0" step="0.01" value={businessSettings.laborRateDefault} onChange={(e) => updateForm(setBusinessSettings, 'laborRateDefault', e.target.value)} />
+              </label>
+              <label className="full-span">
+                Address
+                <textarea value={businessSettings.address} onChange={(e) => updateForm(setBusinessSettings, 'address', e.target.value)} />
+              </label>
+              <label>
+                Tax Rate %
+                <input type="number" min="0" step="0.01" value={businessSettings.taxRate} onChange={(e) => updateForm(setBusinessSettings, 'taxRate', e.target.value)} />
+              </label>
+              <label className="full-span">
+                Quote Terms
+                <textarea value={businessSettings.quoteTerms} onChange={(e) => updateForm(setBusinessSettings, 'quoteTerms', e.target.value)} />
+              </label>
+              <label className="full-span">
+                Invoice Footer
+                <textarea value={businessSettings.invoiceFooter} onChange={(e) => updateForm(setBusinessSettings, 'invoiceFooter', e.target.value)} />
+              </label>
+            </div>
+            <button type="button" className="primary-action" onClick={saveBusinessProfile}>Save Business Settings</button>
           </div>
           <div className="local-subpanel">
             <h2>App Lock</h2>
@@ -1957,20 +2081,59 @@ export default function App() {
                         {statusOptions.map((option) => <option key={option} value={option}>{option}</option>)}
                       </select>
                     </label>
-                    <label>
-                      Labor Rate
-                      <input type="number" min="0" step="0.01" value={workorderForm.laborRate} onChange={(e) => updateForm(setWorkorderForm, 'laborRate', e.target.value)} />
-                    </label>
-                    <label>
-                      Manual Labor Hours
-                      <input type="number" min="0" step="0.1" value={workorderForm.laborHours} onChange={(e) => updateForm(setWorkorderForm, 'laborHours', e.target.value)} />
-                    </label>
+                <label>
+                  Labor Rate
+                  <input type="number" min="0" step="0.01" value={workorderForm.laborRate} onChange={(e) => updateForm(setWorkorderForm, 'laborRate', e.target.value)} placeholder={String(businessSettings.laborRateDefault)} />
+                </label>
+                <label>
+                  Manual Labor Hours
+                  <input type="number" min="0" step="0.1" value={workorderForm.laborHours} onChange={(e) => updateForm(setWorkorderForm, 'laborHours', e.target.value)} />
+                </label>
                     <label>
                       Timer
                       <div className="timer-row">
                         <strong>{formatDuration(activeTimerMs)}</strong>
                         <button type="button" onClick={workorderForm.laborStartedAt ? stopTimer : startTimer}>
                           {workorderForm.laborStartedAt ? 'Stop Timer' : 'Start Timer'}
+                        </button>
+                      </div>
+                    </label>
+                    <label>
+                      Approval Status
+                      <select value={workorderForm.approvalStatus} onChange={(e) => updateForm(setWorkorderForm, 'approvalStatus', e.target.value)}>
+                        <option value="pending">Pending</option>
+                        <option value="approved">Approved</option>
+                        <option value="declined">Declined</option>
+                      </select>
+                    </label>
+                    <label>
+                      Approval Method
+                      <select value={workorderForm.approvalMethod} onChange={(e) => updateForm(setWorkorderForm, 'approvalMethod', e.target.value)}>
+                        <option value="">Choose</option>
+                        <option value="in person">In Person</option>
+                        <option value="phone">Phone</option>
+                        <option value="text">Text</option>
+                        <option value="email">Email</option>
+                      </select>
+                    </label>
+                    <label>
+                      Approved By
+                      <input value={workorderForm.approvedBy} onChange={(e) => updateForm(setWorkorderForm, 'approvedBy', e.target.value)} />
+                    </label>
+                    <label>
+                      Approval Limit
+                      <input type="number" min="0" step="0.01" value={workorderForm.approvalLimit} onChange={(e) => updateForm(setWorkorderForm, 'approvalLimit', e.target.value)} />
+                    </label>
+                    <label>
+                      Approved At
+                      <input value={workorderForm.approvedAt} onChange={(e) => updateForm(setWorkorderForm, 'approvedAt', e.target.value)} placeholder="Auto or manual note" />
+                    </label>
+                    <label className="full-span">
+                      Estimate / Quote Notes
+                      <div className="voice-grid">
+                        <textarea value={workorderForm.estimateNotes} onChange={(e) => updateForm(setWorkorderForm, 'estimateNotes', e.target.value)} />
+                        <button className="dictate-button" onClick={() => captureSpeech('workorder', 'estimateNotes', setWorkorderForm)} type="button">
+                          {dictatingField === 'workorder:estimateNotes' ? 'Listening...' : 'Voice'}
                         </button>
                       </div>
                     </label>
@@ -1985,6 +2148,7 @@ export default function App() {
                     </label>
                   </div>
                   <div className="inline-actions">
+                    <button type="button" onClick={markQuoteApprovedNow}>Mark Approved Now</button>
                     <button className="primary-action" onClick={saveWorkorder}>Save Workorder</button>
                   </div>
                 </>
@@ -2094,6 +2258,7 @@ export default function App() {
                   <div><span>Customer</span><strong>{selectedCustomer?.name || selectedWorkorder.customerName || 'None'}</strong></div>
                   <div><span>Machine</span><strong>{selectedMachine?.name || selectedWorkorder.equipmentName || 'None'}</strong></div>
                   <div><span>Status</span><strong>{workorderForm.status || selectedWorkorder.status}</strong></div>
+                  <div><span>Quote Approval</span><strong>{workorderForm.approvalStatus || 'pending'}</strong></div>
                   {selectedMachine && <div><span>Brand / Model</span><strong>{[selectedMachine.make, selectedMachine.model].filter(Boolean).join(' ') || 'None'}</strong></div>}
                 </div>
               ) : (
@@ -2126,10 +2291,18 @@ export default function App() {
                   <div className="summary-list">
                     <div><span>Parts</span><strong>{formatCurrency(invoiceTotals.partsRetail)}</strong></div>
                     <div><span>Labor ({invoiceTotals.laborHours.toFixed(2)} hrs)</span><strong>{formatCurrency(invoiceTotals.labor)}</strong></div>
+                    <div><span>Subtotal</span><strong>{formatCurrency(invoiceTotals.subtotal)}</strong></div>
+                    <div><span>Tax ({Number(businessSettings.taxRate || 0).toFixed(2)}%)</span><strong>{formatCurrency(invoiceTotals.tax)}</strong></div>
                   </div>
                   <div className="invoice-total">
                     <span>Total</span>
                     <strong>{formatCurrency(invoiceTotals.total)}</strong>
+                  </div>
+                  <div className="summary-list">
+                    <div><span>Approved By</span><strong>{workorderForm.approvedBy || 'Not recorded'}</strong></div>
+                    <div><span>Method</span><strong>{workorderForm.approvalMethod || 'Not recorded'}</strong></div>
+                    <div><span>Approved At</span><strong>{workorderForm.approvedAt || 'Not recorded'}</strong></div>
+                    <div><span>Limit</span><strong>{workorderForm.approvalLimit ? formatCurrency(workorderForm.approvalLimit) : 'Not set'}</strong></div>
                   </div>
                   <div className="signature-block">
                     <label>
@@ -2159,6 +2332,7 @@ export default function App() {
                     <button onClick={() => exportSelectedWorkorder(false)}>Export for Email</button>
                     <button onClick={() => exportSelectedWorkorder(true)}>Open PDF Print View</button>
                   </div>
+                  {businessSettings.invoiceFooter && <p>{businessSettings.invoiceFooter}</p>}
                 </>
               ) : (
                 <div className="empty-state">Select a workorder first.</div>

@@ -172,6 +172,12 @@ function createSystemTables() {
       equipmentId INTEGER,
       complaint TEXT,
       diagnosis TEXT,
+      estimateNotes TEXT,
+      approvalStatus TEXT DEFAULT 'pending',
+      approvalMethod TEXT,
+      approvalLimit REAL DEFAULT 0,
+      approvedBy TEXT,
+      approvedAt TEXT,
       laborNotes TEXT,
       laborHours REAL DEFAULT 0,
       laborRate REAL DEFAULT 0,
@@ -304,6 +310,12 @@ function ensureSchema() {
     }
 
     const names = columns.map((column) => column.name);
+    ensureColumn('workorders', names, 'estimateNotes', 'TEXT');
+    ensureColumn('workorders', names, 'approvalStatus', "TEXT DEFAULT 'pending'");
+    ensureColumn('workorders', names, 'approvalMethod', 'TEXT');
+    ensureColumn('workorders', names, 'approvalLimit', 'REAL DEFAULT 0');
+    ensureColumn('workorders', names, 'approvedBy', 'TEXT');
+    ensureColumn('workorders', names, 'approvedAt', 'TEXT');
     ensureColumn('workorders', names, 'laborStartedAt', 'TEXT');
     ensureColumn('workorders', names, 'laborAccumulatedMs', 'INTEGER DEFAULT 0');
     ensureColumn('workorders', names, 'customerSignatureDataUrl', 'TEXT');
@@ -929,6 +941,12 @@ app.post('/api/workorders', requireRole('owner', 'tech'), (req, res) => {
   const equipmentId = req.body.equipmentId ? Number(req.body.equipmentId) : null;
   const complaint = String(req.body.complaint || '').trim();
   const diagnosis = String(req.body.diagnosis || '').trim();
+  const estimateNotes = String(req.body.estimateNotes || '').trim();
+  const approvalStatus = String(req.body.approvalStatus || 'pending').trim();
+  const approvalMethod = String(req.body.approvalMethod || '').trim();
+  const approvalLimit = Number(req.body.approvalLimit) || 0;
+  const approvedBy = String(req.body.approvedBy || '').trim();
+  const approvedAt = String(req.body.approvedAt || '').trim();
   const laborNotes = String(req.body.laborNotes || '').trim();
   const laborHours = Number(req.body.laborHours) || 0;
   const laborRate = Number(req.body.laborRate) || 0;
@@ -942,12 +960,14 @@ app.post('/api/workorders', requireRole('owner', 'tech'), (req, res) => {
 
   db.run(
     `INSERT INTO workorders (
-      number, title, status, customerId, equipmentId, complaint, diagnosis, laborNotes, laborHours, laborRate,
-      laborStartedAt, laborAccumulatedMs, customerSignatureDataUrl, customerSignatureName, customerSignedAt
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      number, title, status, customerId, equipmentId, complaint, diagnosis, estimateNotes, approvalStatus, approvalMethod,
+      approvalLimit, approvedBy, approvedAt, laborNotes, laborHours, laborRate, laborStartedAt, laborAccumulatedMs,
+      customerSignatureDataUrl, customerSignatureName, customerSignedAt
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
-      number, title, status, customerId, equipmentId, complaint, diagnosis, laborNotes, laborHours, laborRate,
-      laborStartedAt, laborAccumulatedMs, customerSignatureDataUrl, customerSignatureName, customerSignedAt
+      number, title, status, customerId, equipmentId, complaint, diagnosis, estimateNotes, approvalStatus, approvalMethod,
+      approvalLimit, approvedBy, approvedAt, laborNotes, laborHours, laborRate, laborStartedAt, laborAccumulatedMs,
+      customerSignatureDataUrl, customerSignatureName, customerSignedAt
     ],
     function (err) {
       if (err) {
@@ -969,6 +989,12 @@ app.put('/api/workorders/:id', requireRole('owner', 'tech'), (req, res) => {
   const equipmentId = req.body.equipmentId ? Number(req.body.equipmentId) : null;
   const complaint = String(req.body.complaint || '').trim();
   const diagnosis = String(req.body.diagnosis || '').trim();
+  const estimateNotes = String(req.body.estimateNotes || '').trim();
+  const approvalStatus = String(req.body.approvalStatus || 'pending').trim();
+  const approvalMethod = String(req.body.approvalMethod || '').trim();
+  const approvalLimit = Number(req.body.approvalLimit) || 0;
+  const approvedBy = String(req.body.approvedBy || '').trim();
+  const approvedAt = String(req.body.approvedAt || '').trim();
   const laborNotes = String(req.body.laborNotes || '').trim();
   const laborHours = Number(req.body.laborHours) || 0;
   const laborRate = Number(req.body.laborRate) || 0;
@@ -983,13 +1009,14 @@ app.put('/api/workorders/:id', requireRole('owner', 'tech'), (req, res) => {
   db.run(
     `UPDATE workorders SET
       number = ?, title = ?, status = ?, customerId = ?, equipmentId = ?,
-      complaint = ?, diagnosis = ?, laborNotes = ?, laborHours = ?, laborRate = ?,
+      complaint = ?, diagnosis = ?, estimateNotes = ?, approvalStatus = ?, approvalMethod = ?, approvalLimit = ?, approvedBy = ?, approvedAt = ?,
+      laborNotes = ?, laborHours = ?, laborRate = ?,
       laborStartedAt = ?, laborAccumulatedMs = ?, customerSignatureDataUrl = ?, customerSignatureName = ?, customerSignedAt = ?,
       updatedAt = CURRENT_TIMESTAMP
      WHERE id = ?`,
     [
-      number, title, status, customerId, equipmentId, complaint, diagnosis, laborNotes, laborHours, laborRate,
-      laborStartedAt, laborAccumulatedMs, customerSignatureDataUrl, customerSignatureName, customerSignedAt, id
+      number, title, status, customerId, equipmentId, complaint, diagnosis, estimateNotes, approvalStatus, approvalMethod, approvalLimit, approvedBy, approvedAt,
+      laborNotes, laborHours, laborRate, laborStartedAt, laborAccumulatedMs, customerSignatureDataUrl, customerSignatureName, customerSignedAt, id
     ],
     function (err) {
       if (err) {
