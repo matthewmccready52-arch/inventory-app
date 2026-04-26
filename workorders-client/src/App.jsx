@@ -37,6 +37,7 @@ const emptyWorkorder = {
   status: 'open',
   customerId: '',
   equipmentId: '',
+  receivedAt: '',
   complaint: '',
   diagnosis: '',
   estimateNotes: '',
@@ -45,6 +46,9 @@ const emptyWorkorder = {
   approvalLimit: '',
   approvedBy: '',
   approvedAt: '',
+  completedAt: '',
+  invoicedAt: '',
+  pickedUpAt: '',
   laborNotes: '',
   laborHours: 0,
   laborRate: 0,
@@ -93,6 +97,7 @@ function normalizeWorkorderForForm(workorder) {
     status: workorder.status || 'open',
     customerId: workorder.customerId ? String(workorder.customerId) : '',
     equipmentId: workorder.equipmentId ? String(workorder.equipmentId) : '',
+    receivedAt: workorder.receivedAt || workorder.createdAt || '',
     complaint: workorder.complaint || '',
     diagnosis: workorder.diagnosis || '',
     estimateNotes: workorder.estimateNotes || '',
@@ -101,6 +106,9 @@ function normalizeWorkorderForForm(workorder) {
     approvalLimit: workorder.approvalLimit === null || workorder.approvalLimit === undefined ? '' : String(workorder.approvalLimit),
     approvedBy: workorder.approvedBy || '',
     approvedAt: workorder.approvedAt || '',
+    completedAt: workorder.completedAt || '',
+    invoicedAt: workorder.invoicedAt || '',
+    pickedUpAt: workorder.pickedUpAt || '',
     laborNotes: workorder.laborNotes || '',
     laborHours: Number(workorder.laborHours || 0),
     laborRate: Number(workorder.laborRate || 0),
@@ -418,6 +426,17 @@ function nowIso() {
   return new Date().toISOString()
 }
 
+function withLifecycleTimestamps(current, previousStatus = '') {
+  const next = { ...current }
+  const now = nowIso()
+  if (!next.receivedAt) next.receivedAt = now
+  if (next.approvalStatus === 'approved' && !next.approvedAt) next.approvedAt = now
+  if (next.status === 'complete' && previousStatus !== 'complete' && !next.completedAt) next.completedAt = now
+  if (next.status === 'invoiced' && previousStatus !== 'invoiced' && !next.invoicedAt) next.invoicedAt = now
+  if (next.status === 'picked up' && previousStatus !== 'picked up' && !next.pickedUpAt) next.pickedUpAt = now
+  return next
+}
+
 function buildWorkorderHtml(workorder, customer, machine, partRows, settings, originLabel = 'Local device storage') {
   const business = normalizeBusinessSettings(settings)
   const partsRetail = partRows.reduce((sum, row) => sum + Number(row.qtyUsed || 0) * Number(row.retailPrice || 0), 0)
@@ -462,6 +481,15 @@ function buildWorkorderHtml(workorder, customer, machine, partRows, settings, or
   ].filter(([, value]) => value)
 
   const headerContact = [business.phone, business.email].filter(Boolean).join(' | ')
+  const timeRows = [
+    ['Date received', workorder.receivedAt || workorder.createdAt || ''],
+    ['Estimate approved', workorder.approvedAt || ''],
+    ['Completed', workorder.completedAt || ''],
+    ['Invoiced', workorder.invoicedAt || ''],
+    ['Picked up', workorder.pickedUpAt || ''],
+    ['Customer signed', workorder.customerSignedAt || ''],
+    ['Last updated', workorder.updatedAt || '']
+  ].filter(([, value]) => value)
 
   return `<!doctype html>
 <html>
@@ -507,7 +535,7 @@ function buildWorkorderHtml(workorder, customer, machine, partRows, settings, or
     <div>
       <h2>${htmlEscape(workorder.number)}</h2>
       <p><span class="status-chip">${htmlEscape(workorder.status || 'open')}</span></p>
-      <p>Date received: ${htmlEscape(workorder.createdAt || '')}</p>
+      <p>Date received: ${htmlEscape(workorder.receivedAt || workorder.createdAt || '')}</p>
     </div>
   </header>
   <section class="grid">
@@ -536,6 +564,7 @@ function buildWorkorderHtml(workorder, customer, machine, partRows, settings, or
     ${approvalRows.length ? `<table><tbody>${approvalRows.map(([label, value]) => `<tr><th>${htmlEscape(label)}</th><td>${htmlEscape(value)}</td></tr>`).join('')}</tbody></table>` : ''}
     ${business.quoteTerms ? `<p class="muted">${htmlEscape(business.quoteTerms)}</p>` : ''}
   </div>
+  ${timeRows.length ? `<h2>Timeline</h2><div class="box"><table><tbody>${timeRows.map(([label, value]) => `<tr><th>${htmlEscape(label)}</th><td>${htmlEscape(new Date(value).toLocaleString())}</td></tr>`).join('')}</tbody></table></div>` : ''}
   <h2>Repair Summary</h2>
   <div class="box">${htmlEscape(workorder.diagnosis || workorder.laborNotes || '').replace(/\n/g, '<br>') || 'No repair notes recorded.'}</div>
   ${photos ? `<h2>Machine Intake Photos</h2><div class="photos">${photos}</div>` : ''}
@@ -1207,21 +1236,28 @@ export default function App() {
 
   async function addWorkorder() {
     if (!canWrite || !workorderForm.title.trim()) return
+    const preparedForm = withLifecycleTimestamps(
+      {
+        ...workorderForm,
+        laborRate: Number(workorderForm.laborRate) || Number(businessSettings.laborRateDefault) || 0
+      },
+      ''
+    )
 
     if (activeMode === 'local') {
       const created = withLocalDb((db) => {
         const id = nextId(db.meta, 'nextWorkorderId')
-        const number = workorderForm.number.trim() || `WO-${String(id).padStart(5, '0')}`
+        const number = preparedForm.number.trim() || `WO-${String(id).padStart(5, '0')}`
         const record = {
           id,
-          ...workorderForm,
+          ...preparedForm,
           number,
-          customerId: workorderForm.customerId ? Number(workorderForm.customerId) : null,
-          equipmentId: workorderForm.equipmentId ? Number(workorderForm.equipmentId) : null,
-          laborHours: Number(workorderForm.laborHours) || 0,
-          laborRate: Number(workorderForm.laborRate) || Number(businessSettings.laborRateDefault) || 0,
-          approvalLimit: Number(workorderForm.approvalLimit) || 0,
-          laborAccumulatedMs: Number(workorderForm.laborAccumulatedMs) || 0,
+          customerId: preparedForm.customerId ? Number(preparedForm.customerId) : null,
+          equipmentId: preparedForm.equipmentId ? Number(preparedForm.equipmentId) : null,
+          laborHours: Number(preparedForm.laborHours) || 0,
+          laborRate: Number(preparedForm.laborRate) || Number(businessSettings.laborRateDefault) || 0,
+          approvalLimit: Number(preparedForm.approvalLimit) || 0,
+          laborAccumulatedMs: Number(preparedForm.laborAccumulatedMs) || 0,
           createdAt: nowIso(),
           updatedAt: nowIso()
         }
@@ -1239,12 +1275,12 @@ export default function App() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        ...workorderForm,
-        customerId: workorderForm.customerId ? Number(workorderForm.customerId) : null,
-        equipmentId: workorderForm.equipmentId ? Number(workorderForm.equipmentId) : null,
-        laborHours: Number(workorderForm.laborHours) || 0,
-        laborRate: Number(workorderForm.laborRate) || Number(businessSettings.laborRateDefault) || 0,
-        approvalLimit: Number(workorderForm.approvalLimit) || 0
+        ...preparedForm,
+        customerId: preparedForm.customerId ? Number(preparedForm.customerId) : null,
+        equipmentId: preparedForm.equipmentId ? Number(preparedForm.equipmentId) : null,
+        laborHours: Number(preparedForm.laborHours) || 0,
+        laborRate: Number(preparedForm.laborRate) || Number(businessSettings.laborRateDefault) || 0,
+        approvalLimit: Number(preparedForm.approvalLimit) || 0
       })
     })
     const data = await res.json()
@@ -1263,22 +1299,24 @@ export default function App() {
       setStatus('Select a workorder first.')
       return
     }
+    const preparedForm = withLifecycleTimestamps(workorderForm, selectedWorkorder.status || '')
 
     if (activeMode === 'local') {
       withLocalDb((db) => {
         const row = db.workorders.find((item) => Number(item.id) === Number(selectedWorkorder.id))
         if (!row) return
         Object.assign(row, {
-          ...workorderForm,
-          customerId: workorderForm.customerId ? Number(workorderForm.customerId) : null,
-          equipmentId: workorderForm.equipmentId ? Number(workorderForm.equipmentId) : null,
-          laborHours: Number(workorderForm.laborHours) || 0,
-          laborRate: Number(workorderForm.laborRate) || Number(businessSettings.laborRateDefault) || 0,
-          approvalLimit: Number(workorderForm.approvalLimit) || 0,
-          laborAccumulatedMs: Number(workorderForm.laborAccumulatedMs) || 0,
+          ...preparedForm,
+          customerId: preparedForm.customerId ? Number(preparedForm.customerId) : null,
+          equipmentId: preparedForm.equipmentId ? Number(preparedForm.equipmentId) : null,
+          laborHours: Number(preparedForm.laborHours) || 0,
+          laborRate: Number(preparedForm.laborRate) || Number(businessSettings.laborRateDefault) || 0,
+          approvalLimit: Number(preparedForm.approvalLimit) || 0,
+          laborAccumulatedMs: Number(preparedForm.laborAccumulatedMs) || 0,
           updatedAt: nowIso()
         })
       })
+      setWorkorderForm(preparedForm)
       setStatus(`Saved ${workorderForm.number || selectedWorkorder.number} on this device.`)
       await loadLocalAll()
       await loadSelectedWorkorderData(selectedWorkorder.id)
@@ -1289,13 +1327,13 @@ export default function App() {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        ...workorderForm,
-        customerId: workorderForm.customerId ? Number(workorderForm.customerId) : null,
-        equipmentId: workorderForm.equipmentId ? Number(workorderForm.equipmentId) : null,
-        laborHours: Number(workorderForm.laborHours) || 0,
-        laborRate: Number(workorderForm.laborRate) || Number(businessSettings.laborRateDefault) || 0,
-        approvalLimit: Number(workorderForm.approvalLimit) || 0,
-        laborAccumulatedMs: Number(workorderForm.laborAccumulatedMs) || 0
+        ...preparedForm,
+        customerId: preparedForm.customerId ? Number(preparedForm.customerId) : null,
+        equipmentId: preparedForm.equipmentId ? Number(preparedForm.equipmentId) : null,
+        laborHours: Number(preparedForm.laborHours) || 0,
+        laborRate: Number(preparedForm.laborRate) || Number(businessSettings.laborRateDefault) || 0,
+        approvalLimit: Number(preparedForm.approvalLimit) || 0,
+        laborAccumulatedMs: Number(preparedForm.laborAccumulatedMs) || 0
       })
     })
     const data = await res.json()
@@ -1303,6 +1341,7 @@ export default function App() {
       setStatus(data.error || 'Failed to save workorder.')
       return
     }
+    setWorkorderForm(preparedForm)
     setStatus(`Saved ${workorderForm.number || selectedWorkorder.number}.`)
     await loadAll()
     await loadSelectedWorkorderData(selectedWorkorder.id)
@@ -2098,6 +2137,30 @@ export default function App() {
                       </div>
                     </label>
                     <label>
+                      Date Received
+                      <input value={workorderForm.receivedAt ? new Date(workorderForm.receivedAt).toLocaleString() : ''} readOnly />
+                    </label>
+                    <label>
+                      Estimate Approved
+                      <input value={workorderForm.approvedAt ? new Date(workorderForm.approvedAt).toLocaleString() : ''} readOnly />
+                    </label>
+                    <label>
+                      Completed
+                      <input value={workorderForm.completedAt ? new Date(workorderForm.completedAt).toLocaleString() : ''} readOnly />
+                    </label>
+                    <label>
+                      Invoiced
+                      <input value={workorderForm.invoicedAt ? new Date(workorderForm.invoicedAt).toLocaleString() : ''} readOnly />
+                    </label>
+                    <label>
+                      Picked Up
+                      <input value={workorderForm.pickedUpAt ? new Date(workorderForm.pickedUpAt).toLocaleString() : ''} readOnly />
+                    </label>
+                    <label>
+                      Last Updated
+                      <input value={selectedWorkorder?.updatedAt ? new Date(selectedWorkorder.updatedAt).toLocaleString() : ''} readOnly />
+                    </label>
+                    <label>
                       Estimate Status
                       <select value={workorderForm.approvalStatus} onChange={(e) => updateForm(setWorkorderForm, 'approvalStatus', e.target.value)}>
                         <option value="pending">Pending</option>
@@ -2125,7 +2188,7 @@ export default function App() {
                     </label>
                     <label>
                       Approved At
-                      <input value={workorderForm.approvedAt} onChange={(e) => updateForm(setWorkorderForm, 'approvedAt', e.target.value)} placeholder="Auto or manual note" />
+                      <input value={workorderForm.approvedAt ? new Date(workorderForm.approvedAt).toLocaleString() : ''} readOnly />
                     </label>
                     <label className="full-span">
                       Estimate Notes

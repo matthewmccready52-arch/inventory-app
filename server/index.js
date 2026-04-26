@@ -170,6 +170,7 @@ function createSystemTables() {
       status TEXT DEFAULT 'open',
       customerId INTEGER,
       equipmentId INTEGER,
+      receivedAt TEXT,
       complaint TEXT,
       diagnosis TEXT,
       estimateNotes TEXT,
@@ -178,6 +179,9 @@ function createSystemTables() {
       approvalLimit REAL DEFAULT 0,
       approvedBy TEXT,
       approvedAt TEXT,
+      completedAt TEXT,
+      invoicedAt TEXT,
+      pickedUpAt TEXT,
       laborNotes TEXT,
       laborHours REAL DEFAULT 0,
       laborRate REAL DEFAULT 0,
@@ -310,12 +314,16 @@ function ensureSchema() {
     }
 
     const names = columns.map((column) => column.name);
+    ensureColumn('workorders', names, 'receivedAt', 'TEXT');
     ensureColumn('workorders', names, 'estimateNotes', 'TEXT');
     ensureColumn('workorders', names, 'approvalStatus', "TEXT DEFAULT 'pending'");
     ensureColumn('workorders', names, 'approvalMethod', 'TEXT');
     ensureColumn('workorders', names, 'approvalLimit', 'REAL DEFAULT 0');
     ensureColumn('workorders', names, 'approvedBy', 'TEXT');
     ensureColumn('workorders', names, 'approvedAt', 'TEXT');
+    ensureColumn('workorders', names, 'completedAt', 'TEXT');
+    ensureColumn('workorders', names, 'invoicedAt', 'TEXT');
+    ensureColumn('workorders', names, 'pickedUpAt', 'TEXT');
     ensureColumn('workorders', names, 'laborStartedAt', 'TEXT');
     ensureColumn('workorders', names, 'laborAccumulatedMs', 'INTEGER DEFAULT 0');
     ensureColumn('workorders', names, 'customerSignatureDataUrl', 'TEXT');
@@ -801,6 +809,15 @@ app.get('/api/workorders/:id/export', async (req, res) => {
       ['Approved At', workorder.approvedAt || ''],
       ['Approval Limit', workorder.approvalLimit ? money(workorder.approvalLimit) : '']
     ].filter(([, value]) => value);
+    const timeRows = [
+      ['Date received', workorder.receivedAt || workorder.createdAt || ''],
+      ['Estimate approved', workorder.approvedAt || ''],
+      ['Completed', workorder.completedAt || ''],
+      ['Invoiced', workorder.invoicedAt || ''],
+      ['Picked up', workorder.pickedUpAt || ''],
+      ['Customer signed', workorder.customerSignedAt || ''],
+      ['Last updated', workorder.updatedAt || '']
+    ].filter(([, value]) => value);
     const origin = `${req.protocol}://${req.get('host')}`;
     const imageUrl = (src) => {
       if (!src) return '';
@@ -879,7 +896,7 @@ app.get('/api/workorders/:id/export', async (req, res) => {
     <div>
       <h2>${htmlEscape(workorder.number)}</h2>
       <p><span class="status-chip">${htmlEscape(workorder.status || 'open')}</span></p>
-      <p>Date received: ${htmlEscape(workorder.createdAt || '')}</p>
+      <p>Date received: ${htmlEscape(workorder.receivedAt || workorder.createdAt || '')}</p>
     </div>
   </header>
 
@@ -910,6 +927,7 @@ app.get('/api/workorders/:id/export', async (req, res) => {
     ${workorder.estimateNotes ? `<p>${htmlEscape(workorder.estimateNotes).replace(/\n/g, '<br>')}</p>` : '<p>No estimate notes recorded.</p>'}
     ${approvalRows.length ? `<table><tbody>${approvalRows.map(([label, value]) => `<tr><th>${htmlEscape(label)}</th><td>${htmlEscape(value)}</td></tr>`).join('')}</tbody></table>` : ''}
   </div>
+  ${timeRows.length ? `<h2>Timeline</h2><div class="box"><table><tbody>${timeRows.map(([label, value]) => `<tr><th>${htmlEscape(label)}</th><td>${htmlEscape(new Date(value).toLocaleString())}</td></tr>`).join('')}</tbody></table></div>` : ''}
 
   <h2>Repair Summary</h2>
   <div class="box">${htmlEscape(workorder.diagnosis || workorder.laborNotes || '').replace(/\n/g, '<br>') || 'No repair notes recorded.'}</div>
@@ -953,6 +971,7 @@ app.post('/api/workorders', requireRole('owner', 'tech'), (req, res) => {
   const status = String(req.body.status || 'open').trim();
   const customerId = req.body.customerId ? Number(req.body.customerId) : null;
   const equipmentId = req.body.equipmentId ? Number(req.body.equipmentId) : null;
+  const receivedAt = String(req.body.receivedAt || '').trim();
   const complaint = String(req.body.complaint || '').trim();
   const diagnosis = String(req.body.diagnosis || '').trim();
   const estimateNotes = String(req.body.estimateNotes || '').trim();
@@ -961,6 +980,9 @@ app.post('/api/workorders', requireRole('owner', 'tech'), (req, res) => {
   const approvalLimit = Number(req.body.approvalLimit) || 0;
   const approvedBy = String(req.body.approvedBy || '').trim();
   const approvedAt = String(req.body.approvedAt || '').trim();
+  const completedAt = String(req.body.completedAt || '').trim();
+  const invoicedAt = String(req.body.invoicedAt || '').trim();
+  const pickedUpAt = String(req.body.pickedUpAt || '').trim();
   const laborNotes = String(req.body.laborNotes || '').trim();
   const laborHours = Number(req.body.laborHours) || 0;
   const laborRate = Number(req.body.laborRate) || 0;
@@ -974,13 +996,13 @@ app.post('/api/workorders', requireRole('owner', 'tech'), (req, res) => {
 
   db.run(
     `INSERT INTO workorders (
-      number, title, status, customerId, equipmentId, complaint, diagnosis, estimateNotes, approvalStatus, approvalMethod,
-      approvalLimit, approvedBy, approvedAt, laborNotes, laborHours, laborRate, laborStartedAt, laborAccumulatedMs,
+      number, title, status, customerId, equipmentId, receivedAt, complaint, diagnosis, estimateNotes, approvalStatus, approvalMethod,
+      approvalLimit, approvedBy, approvedAt, completedAt, invoicedAt, pickedUpAt, laborNotes, laborHours, laborRate, laborStartedAt, laborAccumulatedMs,
       customerSignatureDataUrl, customerSignatureName, customerSignedAt
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
-      number, title, status, customerId, equipmentId, complaint, diagnosis, estimateNotes, approvalStatus, approvalMethod,
-      approvalLimit, approvedBy, approvedAt, laborNotes, laborHours, laborRate, laborStartedAt, laborAccumulatedMs,
+      number, title, status, customerId, equipmentId, receivedAt, complaint, diagnosis, estimateNotes, approvalStatus, approvalMethod,
+      approvalLimit, approvedBy, approvedAt, completedAt, invoicedAt, pickedUpAt, laborNotes, laborHours, laborRate, laborStartedAt, laborAccumulatedMs,
       customerSignatureDataUrl, customerSignatureName, customerSignedAt
     ],
     function (err) {
@@ -1001,6 +1023,7 @@ app.put('/api/workorders/:id', requireRole('owner', 'tech'), (req, res) => {
   const status = String(req.body.status || 'open').trim();
   const customerId = req.body.customerId ? Number(req.body.customerId) : null;
   const equipmentId = req.body.equipmentId ? Number(req.body.equipmentId) : null;
+  const receivedAt = String(req.body.receivedAt || '').trim();
   const complaint = String(req.body.complaint || '').trim();
   const diagnosis = String(req.body.diagnosis || '').trim();
   const estimateNotes = String(req.body.estimateNotes || '').trim();
@@ -1009,6 +1032,9 @@ app.put('/api/workorders/:id', requireRole('owner', 'tech'), (req, res) => {
   const approvalLimit = Number(req.body.approvalLimit) || 0;
   const approvedBy = String(req.body.approvedBy || '').trim();
   const approvedAt = String(req.body.approvedAt || '').trim();
+  const completedAt = String(req.body.completedAt || '').trim();
+  const invoicedAt = String(req.body.invoicedAt || '').trim();
+  const pickedUpAt = String(req.body.pickedUpAt || '').trim();
   const laborNotes = String(req.body.laborNotes || '').trim();
   const laborHours = Number(req.body.laborHours) || 0;
   const laborRate = Number(req.body.laborRate) || 0;
@@ -1023,13 +1049,13 @@ app.put('/api/workorders/:id', requireRole('owner', 'tech'), (req, res) => {
   db.run(
     `UPDATE workorders SET
       number = ?, title = ?, status = ?, customerId = ?, equipmentId = ?,
-      complaint = ?, diagnosis = ?, estimateNotes = ?, approvalStatus = ?, approvalMethod = ?, approvalLimit = ?, approvedBy = ?, approvedAt = ?,
+      receivedAt = ?, complaint = ?, diagnosis = ?, estimateNotes = ?, approvalStatus = ?, approvalMethod = ?, approvalLimit = ?, approvedBy = ?, approvedAt = ?, completedAt = ?, invoicedAt = ?, pickedUpAt = ?,
       laborNotes = ?, laborHours = ?, laborRate = ?,
       laborStartedAt = ?, laborAccumulatedMs = ?, customerSignatureDataUrl = ?, customerSignatureName = ?, customerSignedAt = ?,
       updatedAt = CURRENT_TIMESTAMP
      WHERE id = ?`,
     [
-      number, title, status, customerId, equipmentId, complaint, diagnosis, estimateNotes, approvalStatus, approvalMethod, approvalLimit, approvedBy, approvedAt,
+      number, title, status, customerId, equipmentId, receivedAt, complaint, diagnosis, estimateNotes, approvalStatus, approvalMethod, approvalLimit, approvedBy, approvedAt, completedAt, invoicedAt, pickedUpAt,
       laborNotes, laborHours, laborRate, laborStartedAt, laborAccumulatedMs, customerSignatureDataUrl, customerSignatureName, customerSignedAt, id
     ],
     function (err) {
