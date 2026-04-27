@@ -48,9 +48,9 @@
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<true/>
 	<key>NSCameraUsageDescription</key>
-	<string>Inventory uses the camera to scan part barcodes.</string>
+	<string>Inventory uses the camera to scan part barcodes and capture part photos.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Inventory connects to your local inventory server.</string>
+	<string>Inventory connects to your local inventory server when shared shop data is in use.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>

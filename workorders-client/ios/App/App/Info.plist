@@ -48,13 +48,13 @@
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<true/>
 	<key>NSCameraUsageDescription</key>
-	<string>Workorders uses the camera for machine intake photos and barcode scanning.</string>
+	<string>Workorders uses the camera for machine intake photos, serial number capture, and barcode scanning.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Workorders uses the microphone for voice-to-text notes.</string>
+	<string>Workorders uses the microphone for voice-to-text intake, diagnosis, and repair notes.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Workorders uses speech recognition to fill out intake and repair notes.</string>
+	<string>Workorders uses speech recognition to fill in intake, estimate, and repair notes faster.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Workorders connects to your local shop server.</string>
+	<string>Workorders connects to your local shop server when shared inventory data is available.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>

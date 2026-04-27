@@ -38,6 +38,69 @@ Apple requires macOS and Xcode to build or install an iPhone app.
 
 6. In Xcode, select the `App` target, choose your Apple developer team, connect your iPhone, then press Run.
 
+## TestFlight handoff
+
+If your friend is helping from a Mac, this is the shortest path to an iPhone share link:
+
+1. Open the project in Xcode with:
+
+   ```bash
+   npm run ios:open
+   ```
+
+2. In Xcode:
+   - select the `App` target
+   - set a unique bundle identifier if needed
+   - choose the Apple developer team
+   - set the version and build number
+
+3. Build once to a physical iPhone to confirm permissions and signing.
+
+4. In Xcode, choose:
+
+   ```text
+   Product -> Archive
+   ```
+
+5. In Organizer, choose:
+   - `Distribute App`
+   - `App Store Connect`
+   - `Upload`
+
+6. In App Store Connect:
+   - open the app
+   - open the `TestFlight` tab
+   - add tester notes
+   - invite internal testers or create a public testing link
+
+## Ready-to-paste TestFlight notes
+
+### Beta App Description
+
+Workorders helps small repair shops manage machine intake, diagnosis, estimate approval, parts used, repair notes, signatures, and printable customer copies from one mobile workflow.
+
+### What To Test
+
+- create a customer and machine
+- capture serial number and fleet photos
+- create a workorder
+- use voice-to-text for intake and repair notes
+- approve an estimate
+- add or use parts
+- capture a customer signature
+- export a customer copy
+- test offline/local mode and transfer package import/export
+
+### Feedback Email
+
+Use your real shop or project email here before upload.
+
+### Demo Tester Notes
+
+- The app supports offline/local mode.
+- Lifecycle dates use the device clock.
+- If shared server mode is used, enter the shop server URL in settings.
+
 ## Server URL
 
 When running on an iPhone, do not use `localhost` for the backend. Use the PC server URL shown in the app, for example:
