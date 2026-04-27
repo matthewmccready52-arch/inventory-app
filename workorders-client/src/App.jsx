@@ -7,6 +7,8 @@ const LOCAL_DB_KEY = 'workorders:offline-db'
 const LOCAL_MODE_KEY = 'workorders:storageMode'
 const PASSCODE_KEY = 'workorders:appPasscode'
 const BUSINESS_SETTINGS_KEY = 'workorders:businessSettings'
+const DRAFT_KEY = 'workorders:mobileDraft'
+const RELEASE_URL = 'https://github.com/matthewmccready52-arch/inventory-app/raw/main/releases/workorders-debug.apk'
 
 const localUsers = [
   { id: 1, name: 'Owner', role: 'owner', pin: '1234' },
@@ -437,6 +439,28 @@ function withLifecycleTimestamps(current, previousStatus = '') {
   return next
 }
 
+function vibrate(pattern = 30) {
+  if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+    navigator.vibrate(pattern)
+  }
+}
+
+function hasDraftData(draft) {
+  if (!draft) return false
+  return Boolean(
+    draft.customerForm?.name ||
+    draft.customerForm?.phone ||
+    draft.machineForm?.name ||
+    draft.machineForm?.serial ||
+    draft.workorderForm?.title ||
+    draft.workorderForm?.complaint ||
+    draft.workorderForm?.diagnosis ||
+    draft.partForm?.note ||
+    draft.selectedWorkorderId ||
+    draft.selectedCustomerId
+  )
+}
+
 function buildWorkorderHtml(workorder, customer, machine, partRows, settings, originLabel = 'Local device storage') {
   const business = normalizeBusinessSettings(settings)
   const partsRetail = partRows.reduce((sum, row) => sum + Number(row.qtyUsed || 0) * Number(row.retailPrice || 0), 0)
@@ -627,6 +651,20 @@ export default function App() {
   const [dictatingField, setDictatingField] = useState('')
   const [isSignatureDirty, setIsSignatureDirty] = useState(false)
   const [liveTimerMs, setLiveTimerMs] = useState(0)
+  const [draftAvailable, setDraftAvailable] = useState(() => {
+    try {
+      return hasDraftData(JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null'))
+    } catch {
+      return false
+    }
+  })
+  const [lastDraftSavedAt, setLastDraftSavedAt] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null')?.savedAt || ''
+    } catch {
+      return ''
+    }
+  })
   const recognitionRef = useRef(null)
   const signatureCanvasRef = useRef(null)
   const drawingRef = useRef(false)
@@ -778,6 +816,37 @@ export default function App() {
     Promise.resolve().then(() => loadSelectedWorkorderData(selectedWorkorderId)).catch(() => {})
   }, [selectedWorkorderId, loadSelectedWorkorderData])
 
+  useEffect(() => {
+    const draft = {
+      customerForm,
+      machineForm,
+      workorderForm: {
+        ...workorderForm,
+        customerSignatureDataUrl: '',
+        customerSignatureName: signatureName
+      },
+      partForm,
+      activeTab,
+      selectedWorkorderId,
+      selectedCustomerId,
+      searchText,
+      savedAt: nowIso()
+    }
+    if (!hasDraftData(draft)) {
+      localStorage.removeItem(DRAFT_KEY)
+      queueMicrotask(() => {
+        setDraftAvailable(false)
+        setLastDraftSavedAt('')
+      })
+      return
+    }
+    localStorage.setItem(DRAFT_KEY, JSON.stringify(draft))
+    queueMicrotask(() => {
+      setDraftAvailable(true)
+      setLastDraftSavedAt(draft.savedAt)
+    })
+  }, [activeTab, customerForm, machineForm, partForm, searchText, selectedCustomerId, selectedWorkorderId, signatureName, workorderForm])
+
   const selectedWorkorder = useMemo(
     () => workorders.find((workorder) => String(workorder.id) === String(selectedWorkorderId)),
     [workorders, selectedWorkorderId]
@@ -815,6 +884,44 @@ export default function App() {
     complete: workorders.filter((item) => item.status === 'complete').length,
     invoiced: workorders.filter((item) => item.status === 'invoiced').length
   }), [workorders])
+
+  const recentCustomers = useMemo(() => {
+    const ids = [...new Set(workorders.map((item) => item.customerId).filter(Boolean))]
+    return ids
+      .map((id) => customers.find((customer) => String(customer.id) === String(id)))
+      .filter(Boolean)
+      .slice(0, 5)
+  }, [customers, workorders])
+
+  const recentMachines = useMemo(() => {
+    const ids = [...new Set(workorders.map((item) => item.equipmentId).filter(Boolean))]
+    return ids
+      .map((id) => equipment.find((item) => String(item.id) === String(id)))
+      .filter(Boolean)
+      .slice(0, 5)
+  }, [equipment, workorders])
+
+  const connectionState = useMemo(() => {
+    if (storageMode === 'local') {
+      return {
+        tone: 'local',
+        title: 'Offline local mode',
+        detail: 'Everything is saving on this device only.'
+      }
+    }
+    if (backendReachable) {
+      return {
+        tone: 'server',
+        title: 'Connected to shared server',
+        detail: 'Changes are syncing with the shop server.'
+      }
+    }
+    return {
+      tone: 'fallback',
+      title: 'Server unavailable, using local fallback',
+      detail: 'The app is keeping work moving on this device until the server comes back.'
+    }
+  }, [backendReachable, storageMode])
 
   const activeTimerMs = useMemo(() => {
     if (!workorderForm.laborStartedAt) return Number(workorderForm.laborAccumulatedMs || 0)
@@ -903,6 +1010,7 @@ export default function App() {
       localStorage.setItem('workorders:currentUser', JSON.stringify(safeUser))
       setCurrentUser(safeUser)
       setStatus(`Signed in as ${safeUser.name} on this device.`)
+      vibrate(20)
       return
     }
 
@@ -919,6 +1027,7 @@ export default function App() {
     localStorage.setItem('workorders:currentUser', JSON.stringify(data.user))
     setCurrentUser(data.user)
     setStatus(`Signed in as ${data.user.name}.`)
+    vibrate(20)
   }
 
   function logout() {
@@ -932,6 +1041,36 @@ export default function App() {
     localStorage.setItem('workorders:apiBase', cleaned)
     setApiBase(cleaned)
     setStatus(`Server URL saved: ${cleaned}`)
+  }
+
+  function restoreDraft() {
+    try {
+      const draft = JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null')
+      if (!hasDraftData(draft)) {
+        setStatus('No saved draft found.')
+        return
+      }
+      setCustomerForm({ ...emptyCustomer, ...(draft.customerForm || {}) })
+      setMachineForm({ ...emptyMachine, ...(draft.machineForm || {}) })
+      setWorkorderForm({ ...emptyWorkorder, ...(draft.workorderForm || {}) })
+      setPartForm({ ...emptyWorkorderPart, ...(draft.partForm || {}) })
+      setSignatureName(draft.workorderForm?.customerSignatureName || '')
+      setActiveTab(draft.activeTab || 'dashboard')
+      setSelectedWorkorderId(draft.selectedWorkorderId || '')
+      setSelectedCustomerId(draft.selectedCustomerId || '')
+      setSearchText(draft.searchText || '')
+      setStatus('Recovered the saved draft on this device.')
+      vibrate([20, 40, 20])
+    } catch {
+      setStatus('Could not restore the saved draft.')
+    }
+  }
+
+  function clearDraft() {
+    localStorage.removeItem(DRAFT_KEY)
+    setDraftAvailable(false)
+    setLastDraftSavedAt('')
+    setStatus('Saved draft cleared from this device.')
   }
 
   function saveBusinessProfile() {
@@ -1030,10 +1169,49 @@ export default function App() {
     link.remove()
     URL.revokeObjectURL(url)
     setStatus('Transfer package exported.')
+    vibrate([20, 30, 20])
   }
 
   function openImportPicker() {
     importFileRef.current?.click()
+  }
+
+  async function shareWorkorderCopy() {
+    if (!selectedWorkorder) {
+      setStatus('Select a workorder to share.')
+      return
+    }
+    const html = buildWorkorderHtml(
+      { ...selectedWorkorder, ...workorderForm },
+      selectedCustomer,
+      selectedMachine,
+      workorderParts,
+      businessSettings,
+      activeMode === 'local' ? 'Local device storage' : 'Shared server data'
+    )
+    const fileName = `${selectedWorkorder.number || `WO-${selectedWorkorder.id}`}-customer-copy.html`.replace(/[^a-zA-Z0-9._-]/g, '-')
+    const file = new File([html], fileName, { type: 'text/html' })
+
+    if (navigator.share && navigator.canShare?.({ files: [file] })) {
+      try {
+        await navigator.share({
+          title: `${selectedWorkorder.number} customer copy`,
+          text: 'Customer copy from Workorders',
+          files: [file]
+        })
+        setStatus('Customer copy shared.')
+        vibrate([20, 30, 20])
+        return
+      } catch (error) {
+        if (error?.name === 'AbortError') {
+          setStatus('Share canceled.')
+          return
+        }
+      }
+    }
+
+    await exportSelectedWorkorder(false)
+    setStatus('Share sheet was not available, so the customer copy was downloaded instead.')
   }
 
   async function importLocalBackup(event) {
@@ -1090,6 +1268,7 @@ export default function App() {
         const imageUrl = await uploadDataUrl(String(reader.result || ''), file.name)
         updateForm(setMachineForm, field, imageUrl)
         setStatus(field === 'serialPhotoUrl' ? 'Serial photo stored.' : 'Fleet photo stored.')
+        vibrate(20)
       } catch (err) {
         setStatus(err.message)
       }
@@ -1160,6 +1339,7 @@ export default function App() {
       })
       setCustomerForm(emptyCustomer)
       setStatus('Customer saved on this device.')
+      vibrate(20)
       loadLocalAll()
       return
     }
@@ -1176,6 +1356,7 @@ export default function App() {
     }
     setCustomerForm(emptyCustomer)
     setStatus('Customer added.')
+    vibrate(20)
     loadAll()
   }
 
@@ -1193,6 +1374,7 @@ export default function App() {
       })
       setMachineForm({ ...emptyMachine, customerId: machineForm.customerId })
       setStatus('Machine saved on this device.')
+      vibrate(20)
       loadLocalAll()
       return
     }
@@ -1212,6 +1394,7 @@ export default function App() {
     }
     setMachineForm({ ...emptyMachine, customerId: machineForm.customerId })
     setStatus('Machine added.')
+    vibrate(20)
     loadAll()
   }
 
@@ -1231,6 +1414,7 @@ export default function App() {
     })
     setLocalPartForm(emptyLocalPart)
     setStatus('Local part added to this device.')
+    vibrate(20)
     loadLocalAll()
   }
 
@@ -1267,6 +1451,7 @@ export default function App() {
       setSelectedWorkorderId(String(created.id))
       setActiveTab('diagnose')
       setStatus(`Workorder ${created.number} saved on this device.`)
+      vibrate([20, 30, 20])
       loadLocalAll()
       return
     }
@@ -1291,6 +1476,7 @@ export default function App() {
     setSelectedWorkorderId(String(data.id))
     setActiveTab('diagnose')
     setStatus(`Workorder ${data.number} added.`)
+    vibrate([20, 30, 20])
     loadAll()
   }
 
@@ -1318,6 +1504,7 @@ export default function App() {
       })
       setWorkorderForm(preparedForm)
       setStatus(`Saved ${workorderForm.number || selectedWorkorder.number} on this device.`)
+      vibrate([20, 30, 20])
       await loadLocalAll()
       await loadSelectedWorkorderData(selectedWorkorder.id)
       return
@@ -1343,6 +1530,7 @@ export default function App() {
     }
     setWorkorderForm(preparedForm)
     setStatus(`Saved ${workorderForm.number || selectedWorkorder.number}.`)
+    vibrate([20, 30, 20])
     await loadAll()
     await loadSelectedWorkorderData(selectedWorkorder.id)
   }
@@ -1383,6 +1571,7 @@ export default function App() {
       }
       setPartForm(emptyWorkorderPart)
       setStatus(partForm.mode === 'use' ? `Used ${result.actualUsed} part(s) on this device.` : 'Part reserved on this device.')
+      vibrate(20)
       await loadLocalAll()
       await loadSelectedWorkorderData(selectedWorkorder.id)
       return
@@ -1405,6 +1594,7 @@ export default function App() {
     }
     setPartForm(emptyWorkorderPart)
     setStatus(partForm.mode === 'use' ? `Used ${data.actualUsed} part(s).` : 'Part reserved.')
+    vibrate(20)
     await loadAll()
     await loadSelectedWorkorderData(selectedWorkorder.id)
   }
@@ -1515,6 +1705,7 @@ export default function App() {
     link.remove()
     URL.revokeObjectURL(url)
     setStatus(activeMode === 'local' ? 'Local workorder export downloaded.' : 'Workorder export downloaded.')
+    vibrate([20, 30, 20])
   }
 
   async function startTimer() {
@@ -1530,6 +1721,7 @@ export default function App() {
       })
       setWorkorderForm((current) => ({ ...current, laborStartedAt: startedAt }))
       setStatus('Local labor timer started.')
+      vibrate(20)
       return
     }
 
@@ -1541,6 +1733,7 @@ export default function App() {
     }
     setWorkorderForm((current) => ({ ...current, laborStartedAt: data.laborStartedAt || current.laborStartedAt }))
     setStatus('Labor timer started.')
+    vibrate(20)
   }
 
   async function stopTimer() {
@@ -1564,6 +1757,7 @@ export default function App() {
         laborHours
       }))
       setStatus('Local labor timer stopped.')
+      vibrate(20)
       await loadLocalAll()
       await loadSelectedWorkorderData(selectedWorkorder.id)
       return
@@ -1582,6 +1776,7 @@ export default function App() {
       laborHours: Number(data.laborHours || current.laborHours || 0)
     }))
     setStatus('Labor timer stopped.')
+    vibrate(20)
     await loadAll()
     await loadSelectedWorkorderData(selectedWorkorder.id)
   }
@@ -1645,6 +1840,7 @@ export default function App() {
     }))
     setIsSignatureDirty(false)
     setStatus('Signature captured. Save workorder to keep it.')
+    vibrate(20)
   }
 
   function markQuoteApprovedNow() {
@@ -1656,6 +1852,7 @@ export default function App() {
       approvalMethod: current.approvalMethod || 'in person'
     }))
     setStatus('Quote marked approved. Save workorder to keep it.')
+    vibrate([20, 30, 20])
   }
 
   async function copyStatusUpdate() {
@@ -1713,6 +1910,22 @@ export default function App() {
       </header>
 
       {status && <div className="status-bar">{status}</div>}
+      <div className={`connection-banner ${connectionState.tone}`}>
+        <strong>{connectionState.title}</strong>
+        <span>{connectionState.detail}</span>
+      </div>
+      {draftAvailable && (
+        <div className="draft-banner">
+          <div>
+            <strong>Saved draft available</strong>
+            <span>{lastDraftSavedAt ? `Last autosave ${new Date(lastDraftSavedAt).toLocaleString()}` : 'This device has a recoverable draft.'}</span>
+          </div>
+          <div className="inline-actions">
+            <button type="button" onClick={restoreDraft}>Restore Draft</button>
+            <button type="button" onClick={clearDraft}>Clear Draft</button>
+          </div>
+        </div>
+      )}
 
       <section className="top-actions">
         <form className="panel" onSubmit={login}>
@@ -1755,6 +1968,13 @@ export default function App() {
           </label>
           <button onClick={saveApiBase}>Save Server URL</button>
           <p>{activeMode === 'local' ? 'This device is running standalone right now.' : 'This device is using the shared server right now.'}</p>
+          <div className="local-subpanel">
+            <h2>Android Update</h2>
+            <p>Use the latest APK link when you want to update this phone.</p>
+            <div className="inline-actions">
+              <button type="button" onClick={() => window.open(RELEASE_URL, '_blank', 'noopener,noreferrer')}>Open APK Download</button>
+            </div>
+          </div>
           <div className="local-subpanel">
             <h2>Backup & Restore</h2>
             <p>Export a transfer package, send it to another phone or PC, then import it there.</p>
@@ -1872,6 +2092,18 @@ export default function App() {
 
         {activeTab === 'dashboard' && (
           <div className="dashboard-grid">
+            <div className="panel wide-panel">
+              <h2>Quick Actions</h2>
+              <div className="quick-actions-grid">
+                <button className="quick-action-button" onClick={() => setActiveTab('intake')}>New Intake</button>
+                <button className="quick-action-button" onClick={() => selectedWorkorder ? setActiveTab('diagnose') : setActiveTab('dashboard')}>Resume Job</button>
+                <button className="quick-action-button" onClick={() => { setSearchText('waiting parts'); setActiveTab('dashboard') }}>Waiting Parts</button>
+                <button className="quick-action-button" onClick={exportLocalBackup}>Export Package</button>
+                <button className="quick-action-button" onClick={selectedWorkorder ? shareWorkorderCopy : copyStatusUpdate}>
+                  {selectedWorkorder ? 'Share Customer Copy' : 'Copy Status'}
+                </button>
+              </div>
+            </div>
             <div className="panel">
               <h2>Today at a Glance</h2>
               <div className="summary-list">
@@ -1890,6 +2122,44 @@ export default function App() {
                     <span>{item.status}</span>
                   </div>
                 ))}
+              </div>
+            </div>
+            <div className="panel">
+              <h2>Recent Customers</h2>
+              <div className="parts-list">
+                {recentCustomers.map((item) => (
+                  <button
+                    key={item.id}
+                    className="stacked-row"
+                    onClick={() => {
+                      setSelectedCustomerId(String(item.id))
+                      setActiveTab('intake')
+                    }}
+                  >
+                    <strong>{item.name}</strong>
+                    <small>{item.phone || item.email || 'No contact details'}</small>
+                  </button>
+                ))}
+                {recentCustomers.length === 0 && <div className="empty-state">No recent customers yet.</div>}
+              </div>
+            </div>
+            <div className="panel">
+              <h2>Recent Machines</h2>
+              <div className="parts-list">
+                {recentMachines.map((item) => (
+                  <button
+                    key={item.id}
+                    className="stacked-row"
+                    onClick={() => {
+                      updateForm(setWorkorderForm, 'equipmentId', String(item.id))
+                      setActiveTab('intake')
+                    }}
+                  >
+                    <strong>{item.name}</strong>
+                    <small>{[item.make, item.model].filter(Boolean).join(' ') || item.customerName || 'No details yet'}</small>
+                  </button>
+                ))}
+                {recentMachines.length === 0 && <div className="empty-state">No recent machines yet.</div>}
               </div>
             </div>
             <div className="panel wide-panel">
@@ -2044,8 +2314,18 @@ export default function App() {
               </div>
               {(machineForm.serialPhotoUrl || machineForm.fleetPhotoUrl) && (
                 <div className="machine-photo-row">
-                  {machineForm.serialPhotoUrl && <img src={assetUrl(machineForm.serialPhotoUrl)} alt="" />}
-                  {machineForm.fleetPhotoUrl && <img src={assetUrl(machineForm.fleetPhotoUrl)} alt="" />}
+                  {machineForm.serialPhotoUrl && (
+                    <div className="photo-card">
+                      <img src={assetUrl(machineForm.serialPhotoUrl)} alt="" />
+                      <button type="button" onClick={() => updateForm(setMachineForm, 'serialPhotoUrl', '')}>Remove Serial Photo</button>
+                    </div>
+                  )}
+                  {machineForm.fleetPhotoUrl && (
+                    <div className="photo-card">
+                      <img src={assetUrl(machineForm.fleetPhotoUrl)} alt="" />
+                      <button type="button" onClick={() => updateForm(setMachineForm, 'fleetPhotoUrl', '')}>Remove Fleet Photo</button>
+                    </div>
+                  )}
                 </div>
               )}
               <button className="primary-action" onClick={addMachine} disabled={!canWrite}>Add Machine</button>
@@ -2391,6 +2671,7 @@ export default function App() {
                   </div>
                   <div className="inline-actions">
                     <button className="primary-action" onClick={saveWorkorder}>Save Workorder</button>
+                    <button onClick={shareWorkorderCopy}>Share Customer Copy</button>
                     <button onClick={() => exportSelectedWorkorder(false)}>Download Customer Copy</button>
                     <button onClick={() => exportSelectedWorkorder(true)}>Open Print / PDF View</button>
                   </div>
