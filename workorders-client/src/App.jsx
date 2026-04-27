@@ -91,6 +91,49 @@ function formatDuration(ms) {
   return [hours, minutes, seconds].map((value) => String(value).padStart(2, '0')).join(':')
 }
 
+function normalizeLookupValue(value) {
+  return String(value ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+}
+
+function escapePdfText(value) {
+  return String(value ?? '')
+    .normalize('NFKD')
+    .replace(/[^\x20-\x7E\n]/g, '')
+    .replace(/\\/g, '\\\\')
+    .replace(/\(/g, '\\(')
+    .replace(/\)/g, '\\)')
+}
+
+function wrapPdfText(value, maxLength = 88) {
+  const text = String(value ?? '').replace(/\r/g, '')
+  const rawLines = text.split('\n')
+  const output = []
+
+  for (const rawLine of rawLines) {
+    const words = rawLine.split(/\s+/).filter(Boolean)
+    if (!words.length) {
+      output.push('')
+      continue
+    }
+    let current = ''
+    for (const word of words) {
+      const next = current ? `${current} ${word}` : word
+      if (next.length <= maxLength) {
+        current = next
+      } else {
+        if (current) output.push(current)
+        current = word
+      }
+    }
+    if (current) output.push(current)
+  }
+
+  return output.length ? output : ['']
+}
+
 function normalizeWorkorderForForm(workorder) {
   if (!workorder) return emptyWorkorder
   return {
@@ -614,6 +657,141 @@ function buildWorkorderHtml(workorder, customer, machine, partRows, settings, or
 </html>`
 }
 
+function buildWorkorderPdfBlob(workorder, customer, machine, partRows, settings, originLabel = 'Local device storage') {
+  const business = normalizeBusinessSettings(settings)
+  const partsRetail = partRows.reduce((sum, row) => sum + Number(row.qtyUsed || 0) * Number(row.retailPrice || 0), 0)
+  const billedLaborHours = Math.max(Number(workorder.laborHours || 0), computeLaborMs(workorder) / 3600000)
+  const laborTotal = billedLaborHours * Number(workorder.laborRate || 0)
+  const subtotal = partsRetail + laborTotal
+  const taxTotal = subtotal * (Number(business.taxRate || 0) / 100)
+  const grandTotal = subtotal + taxTotal
+  const lines = [
+    business.shopName || 'Service Work Order',
+    'Customer Copy',
+    business.address || '',
+    [business.phone, business.email].filter(Boolean).join(' | '),
+    `Prepared ${new Date().toLocaleString()}`,
+    originLabel,
+    '',
+    `Workorder: ${workorder.number || ''}`,
+    `Status: ${workorder.status || 'open'}`,
+    `Date received: ${workorder.receivedAt || workorder.createdAt || ''}`,
+    '',
+    'Customer',
+    customer?.name || 'No customer',
+    customer?.phone || '',
+    customer?.email || '',
+    customer?.notes || '',
+    '',
+    'Machine',
+    machine?.name || 'No equipment',
+    [machine?.year, machine?.make, machine?.model].filter(Boolean).join(' '),
+    `Fleet/Unit: ${machine?.unitNumber || ''}`,
+    `Serial: ${machine?.serial || ''}`,
+    `VIN: ${machine?.vin || ''}`,
+    `Hours/Mileage: ${[machine?.hours, machine?.mileage].filter(Boolean).join(' / ')}`,
+    '',
+    'Service Intake',
+    workorder.complaint || 'No customer concern recorded.',
+    '',
+    'Estimate Approval',
+    workorder.estimateNotes || 'No estimate notes recorded.',
+    `Estimate status: ${workorder.approvalStatus || 'pending'}`,
+    workorder.approvedBy ? `Approved by: ${workorder.approvedBy}` : '',
+    workorder.approvalMethod ? `Approval method: ${workorder.approvalMethod}` : '',
+    workorder.approvedAt ? `Approved at: ${new Date(workorder.approvedAt).toLocaleString()}` : '',
+    workorder.approvalLimit ? `Approval limit: ${formatCurrency(workorder.approvalLimit)}` : '',
+    business.quoteTerms || '',
+    '',
+    'Repair Summary',
+    workorder.diagnosis || workorder.laborNotes || 'No repair notes recorded.',
+    '',
+    'Parts Used'
+  ]
+
+  if (partRows.length) {
+    for (const part of partRows) {
+      const qty = Number(part.qtyUsed || part.qtyReserved || 0)
+      const lineTotal = Number(part.qtyUsed || 0) * Number(part.retailPrice || 0)
+      lines.push(`${qty} x ${part.partName || 'Unknown part'} (${part.partNumber || 'No code'}) ${formatCurrency(lineTotal)}`)
+      if (part.note) lines.push(`Note: ${part.note}`)
+    }
+  } else {
+    lines.push('No parts recorded.')
+  }
+
+  lines.push(
+    '',
+    'Charges Summary',
+    `Parts: ${formatCurrency(partsRetail)}`,
+    `Labor (${billedLaborHours.toFixed(2)} hrs @ ${formatCurrency(workorder.laborRate)}): ${formatCurrency(laborTotal)}`,
+    `Subtotal: ${formatCurrency(subtotal)}`,
+    `Tax (${Number(business.taxRate || 0).toFixed(2)}%): ${formatCurrency(taxTotal)}`,
+    `Total Due: ${formatCurrency(grandTotal)}`,
+    '',
+    'Timeline'
+  )
+
+  const timelineRows = [
+    ['Date received', workorder.receivedAt || workorder.createdAt || ''],
+    ['Estimate approved', workorder.approvedAt || ''],
+    ['Completed', workorder.completedAt || ''],
+    ['Invoiced', workorder.invoicedAt || ''],
+    ['Picked up', workorder.pickedUpAt || ''],
+    ['Customer signed', workorder.customerSignedAt || ''],
+    ['Last updated', workorder.updatedAt || '']
+  ].filter(([, value]) => value)
+  for (const [label, value] of timelineRows) {
+    lines.push(`${label}: ${new Date(value).toLocaleString()}`)
+  }
+
+  if (business.invoiceFooter) {
+    lines.push('', business.invoiceFooter)
+  }
+
+  const wrappedLines = lines.flatMap((line) => wrapPdfText(line)).map((line) => escapePdfText(line))
+  const linesPerPage = 52
+  const chunks = []
+  for (let index = 0; index < wrappedLines.length; index += linesPerPage) {
+    chunks.push(wrappedLines.slice(index, index + linesPerPage))
+  }
+
+  const objects = []
+  objects[1] = '<< /Type /Catalog /Pages 2 0 R >>'
+  const kidRefs = []
+  let objectNumber = 3
+  for (const chunk of chunks) {
+    const pageObject = objectNumber++
+    const contentObject = objectNumber++
+    kidRefs.push(`${pageObject} 0 R`)
+    const contentStream = [
+      'BT',
+      '/F1 11 Tf',
+      ...chunk.map((line, index) => `1 0 0 1 44 ${792 - index * 14} Tm (${line}) Tj`),
+      'ET'
+    ].join('\n')
+    objects[pageObject] = `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents ${contentObject} 0 R >>`
+    objects[contentObject] = `<< /Length ${contentStream.length} >>\nstream\n${contentStream}\nendstream`
+  }
+  objects[2] = `<< /Type /Pages /Kids [${kidRefs.join(' ')}] /Count ${chunks.length} >>`
+  objects[3] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>'
+
+  let pdf = '%PDF-1.4\n'
+  const offsets = [0]
+  for (let index = 1; index < objects.length; index += 1) {
+    offsets[index] = pdf.length
+    pdf += `${index} 0 obj\n${objects[index]}\nendobj\n`
+  }
+  const xrefStart = pdf.length
+  pdf += `xref\n0 ${objects.length}\n`
+  pdf += '0000000000 65535 f \n'
+  for (let index = 1; index < objects.length; index += 1) {
+    pdf += `${String(offsets[index]).padStart(10, '0')} 00000 n \n`
+  }
+  pdf += `trailer\n<< /Size ${objects.length} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF`
+  return new Blob([pdf], { type: 'application/pdf' })
+}
+
 export default function App() {
   const [apiBase, setApiBase] = useState(() => localStorage.getItem('workorders:apiBase') || defaultApiBase)
   const [storageMode, setStorageMode] = useState(() => localStorage.getItem(LOCAL_MODE_KEY) || 'auto')
@@ -648,6 +826,9 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard')
   const [selectedWorkorderId, setSelectedWorkorderId] = useState('')
   const [selectedCustomerId, setSelectedCustomerId] = useState('')
+  const [scanMode, setScanMode] = useState('smart')
+  const [scanQuery, setScanQuery] = useState('')
+  const [scanResultMessage, setScanResultMessage] = useState('')
   const [dictatingField, setDictatingField] = useState('')
   const [isSignatureDirty, setIsSignatureDirty] = useState(false)
   const [liveTimerMs, setLiveTimerMs] = useState(0)
@@ -667,6 +848,7 @@ export default function App() {
   })
   const recognitionRef = useRef(null)
   const signatureCanvasRef = useRef(null)
+  const scanInputRef = useRef(null)
   const drawingRef = useRef(false)
   const importFileRef = useRef(null)
   const API = `${apiBase.replace(/\/$/, '')}/api`
@@ -923,10 +1105,74 @@ export default function App() {
     }
   }, [backendReachable, storageMode])
 
+  const scanResults = useMemo(() => {
+    const query = normalizeLookupValue(scanQuery)
+    if (!query) return []
+    const results = []
+    const pushMatch = (type, id, title, subtitle, score, payload = {}) => {
+      results.push({ type, id: String(id), title, subtitle, score, ...payload })
+    }
+
+    const scoreValue = (...values) => {
+      const normalizedValues = values.map(normalizeLookupValue).filter(Boolean)
+      if (!normalizedValues.length) return 0
+      if (normalizedValues.some((value) => value === query)) return 300
+      if (normalizedValues.some((value) => value.startsWith(query))) return 200
+      if (normalizedValues.some((value) => value.includes(query))) return 100
+      return 0
+    }
+
+    if (scanMode === 'smart' || scanMode === 'workorder') {
+      for (const item of workorders) {
+        const score = scoreValue(item.number, item.title, item.customerName, item.equipmentName)
+        if (score) {
+          pushMatch('workorder', item.id, `${item.number} - ${item.title}`, `${item.customerName || 'No customer'} | ${item.status}`, score, { workorderId: item.id })
+        }
+      }
+    }
+
+    if (scanMode === 'smart' || scanMode === 'machine') {
+      for (const item of equipment) {
+        const score = scoreValue(item.serial, item.unitNumber, item.name, item.make, item.model, item.customerName)
+        if (score) {
+          pushMatch('machine', item.id, item.name || 'Unnamed machine', [item.serial && `Serial ${item.serial}`, item.unitNumber && `Unit ${item.unitNumber}`, item.customerName].filter(Boolean).join(' | '), score, { equipmentId: item.id, customerId: item.customerId })
+        }
+      }
+    }
+
+    if (scanMode === 'smart' || scanMode === 'part') {
+      for (const item of parts) {
+        const score = scoreValue(item.partNumber, item.name)
+        if (score) {
+          pushMatch('part', item.id, item.name || 'Unnamed part', [item.partNumber, `Qty ${item.quantity ?? 0}`].filter(Boolean).join(' | '), score, { partId: item.id })
+        }
+      }
+    }
+
+    if (scanMode === 'smart' || scanMode === 'customer') {
+      for (const item of customers) {
+        const score = scoreValue(item.name, item.phone, item.email)
+        if (score) {
+          pushMatch('customer', item.id, item.name || 'Unnamed customer', [item.phone, item.email].filter(Boolean).join(' | '), score, { customerId: item.id })
+        }
+      }
+    }
+
+    return results
+      .sort((a, b) => b.score - a.score || a.title.localeCompare(b.title))
+      .slice(0, 8)
+  }, [customers, equipment, parts, scanMode, scanQuery, workorders])
+
   const activeTimerMs = useMemo(() => {
     if (!workorderForm.laborStartedAt) return Number(workorderForm.laborAccumulatedMs || 0)
     return Number(workorderForm.laborAccumulatedMs || 0) + liveTimerMs
   }, [liveTimerMs, workorderForm.laborAccumulatedMs, workorderForm.laborStartedAt])
+
+  useEffect(() => {
+    if (activeTab !== 'scan') return undefined
+    const timer = window.setTimeout(() => scanInputRef.current?.focus(), 60)
+    return () => window.clearTimeout(timer)
+  }, [activeTab])
 
   const invoiceTotals = useMemo(() => {
     const partsRetail = workorderParts.reduce((sum, item) => sum + Number(item.qtyUsed || 0) * Number(item.retailPrice || 0), 0)
@@ -1176,26 +1422,31 @@ export default function App() {
     importFileRef.current?.click()
   }
 
+  function getCurrentExportBundle() {
+    if (!selectedWorkorder) return null
+    return {
+      workorder: { ...selectedWorkorder, ...workorderForm },
+      customer: selectedCustomer,
+      machine: selectedMachine,
+      partRows: workorderParts,
+      originLabel: activeMode === 'local' ? 'Local device storage' : 'Shared server data'
+    }
+  }
+
   async function shareWorkorderCopy() {
-    if (!selectedWorkorder) {
+    const bundle = getCurrentExportBundle()
+    if (!bundle) {
       setStatus('Select a workorder to share.')
       return
     }
-    const html = buildWorkorderHtml(
-      { ...selectedWorkorder, ...workorderForm },
-      selectedCustomer,
-      selectedMachine,
-      workorderParts,
-      businessSettings,
-      activeMode === 'local' ? 'Local device storage' : 'Shared server data'
-    )
-    const fileName = `${selectedWorkorder.number || `WO-${selectedWorkorder.id}`}-customer-copy.html`.replace(/[^a-zA-Z0-9._-]/g, '-')
+    const html = buildWorkorderHtml(bundle.workorder, bundle.customer, bundle.machine, bundle.partRows, businessSettings, bundle.originLabel)
+    const fileName = `${bundle.workorder.number || `WO-${bundle.workorder.id}`}-customer-copy.html`.replace(/[^a-zA-Z0-9._-]/g, '-')
     const file = new File([html], fileName, { type: 'text/html' })
 
     if (navigator.share && navigator.canShare?.({ files: [file] })) {
       try {
         await navigator.share({
-          title: `${selectedWorkorder.number} customer copy`,
+          title: `${bundle.workorder.number} customer copy`,
           text: 'Customer copy from Workorders',
           files: [file]
         })
@@ -1212,6 +1463,107 @@ export default function App() {
 
     await exportSelectedWorkorder(false)
     setStatus('Share sheet was not available, so the customer copy was downloaded instead.')
+  }
+
+  async function shareWorkorderPdf() {
+    const bundle = getCurrentExportBundle()
+    if (!bundle) {
+      setStatus('Select a workorder to share.')
+      return
+    }
+    const pdfBlob = buildWorkorderPdfBlob(bundle.workorder, bundle.customer, bundle.machine, bundle.partRows, businessSettings, bundle.originLabel)
+    const fileName = `${bundle.workorder.number || `WO-${bundle.workorder.id}`}-customer-copy.pdf`.replace(/[^a-zA-Z0-9._-]/g, '-')
+    const file = new File([pdfBlob], fileName, { type: 'application/pdf' })
+
+    if (navigator.share && navigator.canShare?.({ files: [file] })) {
+      try {
+        await navigator.share({
+          title: `${bundle.workorder.number} customer copy PDF`,
+          text: 'Customer PDF from Workorders',
+          files: [file]
+        })
+        setStatus('Customer PDF shared.')
+        vibrate([20, 30, 20])
+        return
+      } catch (error) {
+        if (error?.name === 'AbortError') {
+          setStatus('Share canceled.')
+          return
+        }
+      }
+    }
+
+    downloadWorkorderPdf()
+    setStatus('Share sheet was not available, so the PDF was downloaded instead.')
+  }
+
+  function downloadWorkorderPdf() {
+    const bundle = getCurrentExportBundle()
+    if (!bundle) {
+      setStatus('Select a workorder to export.')
+      return
+    }
+    const pdfBlob = buildWorkorderPdfBlob(bundle.workorder, bundle.customer, bundle.machine, bundle.partRows, businessSettings, bundle.originLabel)
+    const url = URL.createObjectURL(pdfBlob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `${bundle.workorder.number || `WO-${bundle.workorder.id}`}-customer-copy.pdf`.replace(/[^a-zA-Z0-9._-]/g, '-')
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+    setStatus(activeMode === 'local' ? 'Local PDF customer copy downloaded.' : 'PDF customer copy downloaded.')
+    vibrate([20, 30, 20])
+  }
+
+  function applyScanResult(result) {
+    if (!result) return
+    setScanQuery('')
+    setScanResultMessage(`${result.type === 'workorder' ? 'Opened' : result.type === 'machine' ? 'Loaded' : result.type === 'part' ? 'Queued' : 'Selected'} ${result.title}.`)
+    vibrate([20, 30, 20])
+
+    if (result.type === 'workorder') {
+      setSelectedWorkorderId(String(result.workorderId))
+      setActiveTab('diagnose')
+      return
+    }
+    if (result.type === 'machine') {
+      updateForm(setWorkorderForm, 'equipmentId', String(result.equipmentId))
+      if (result.customerId) {
+        setSelectedCustomerId(String(result.customerId))
+        updateForm(setMachineForm, 'customerId', String(result.customerId))
+        updateForm(setWorkorderForm, 'customerId', String(result.customerId))
+      }
+      setActiveTab('intake')
+      return
+    }
+    if (result.type === 'part') {
+      updateForm(setPartForm, 'partId', String(result.partId))
+      setActiveTab('diagnose')
+      return
+    }
+    if (result.type === 'customer') {
+      setSelectedCustomerId(String(result.customerId))
+      updateForm(setMachineForm, 'customerId', String(result.customerId))
+      updateForm(setWorkorderForm, 'customerId', String(result.customerId))
+      const customer = customers.find((item) => String(item.id) === String(result.customerId))
+      if (customer) setSignatureName(customer.name)
+      setActiveTab('intake')
+    }
+  }
+
+  function runScanLookup() {
+    const query = scanQuery.trim()
+    if (!query) {
+      setScanResultMessage('Scan or type a code first.')
+      return
+    }
+    if (!scanResults.length) {
+      setScanResultMessage(`No ${scanMode === 'smart' ? '' : `${scanMode} `}matches for "${query}".`.trim())
+      vibrate(60)
+      return
+    }
+    applyScanResult(scanResults[0])
   }
 
   async function importLocalBackup(event) {
@@ -1669,18 +2021,12 @@ export default function App() {
   }
 
   async function exportSelectedWorkorder(printAfterOpen = false) {
-    if (!selectedWorkorder) {
+    const bundle = getCurrentExportBundle()
+    if (!bundle) {
       setStatus('Select a workorder to export.')
       return
     }
-    const html = buildWorkorderHtml(
-      { ...selectedWorkorder, ...workorderForm },
-      selectedCustomer,
-      selectedMachine,
-      workorderParts,
-      businessSettings,
-      activeMode === 'local' ? 'Local device storage' : 'Shared server data'
-    )
+    const html = buildWorkorderHtml(bundle.workorder, bundle.customer, bundle.machine, bundle.partRows, businessSettings, bundle.originLabel)
     if (printAfterOpen) {
       const printWindow = window.open('', '_blank', 'noopener,noreferrer')
       if (!printWindow) {
@@ -1699,7 +2045,7 @@ export default function App() {
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
-    link.download = `${selectedWorkorder.number || `WO-${selectedWorkorder.id}`}-workorder.html`.replace(/[^a-zA-Z0-9._-]/g, '-')
+    link.download = `${bundle.workorder.number || `WO-${bundle.workorder.id}`}-workorder.html`.replace(/[^a-zA-Z0-9._-]/g, '-')
     document.body.appendChild(link)
     link.click()
     link.remove()
@@ -2065,11 +2411,13 @@ export default function App() {
         <button className={activeTab === 'intake' ? 'active-tab' : ''} onClick={() => setActiveTab('intake')}>Drop-Off Intake</button>
         <button className={activeTab === 'diagnose' ? 'active-tab' : ''} onClick={() => setActiveTab('diagnose')}>Diagnose & Quote</button>
         <button className={activeTab === 'invoice' ? 'active-tab' : ''} onClick={() => setActiveTab('invoice')}>Work Done & Invoice</button>
+        <button className={activeTab === 'scan' ? 'active-tab' : ''} onClick={() => setActiveTab('scan')}>Scan Mode</button>
         <button className={activeTab === 'history' ? 'active-tab' : ''} onClick={() => setActiveTab('history')}>History</button>
       </div>
 
-      <section className="work-grid">
-        <div className="panel">
+      <section className={activeTab === 'scan' ? 'scan-shell' : 'work-grid'}>
+        {activeTab !== 'scan' && (
+          <div className="panel">
           <h2>Workorders</h2>
           <label>
             Search
@@ -2088,7 +2436,69 @@ export default function App() {
             ))}
             {filteredWorkorders.length === 0 && <div className="empty-state">No matching workorders.</div>}
           </div>
-        </div>
+          </div>
+        )}
+
+        {activeTab === 'scan' && (
+          <div className="panel scanner-panel">
+            <div className="scanner-header">
+              <div>
+                <h2>Full-Screen Scan Mode</h2>
+                <p>Use a hardware scanner, paste a code, or type manually. The first match opens fast.</p>
+              </div>
+              <div className="inline-actions">
+                <button type="button" className="primary-action" onClick={runScanLookup}>Open First Match</button>
+                <button type="button" onClick={() => { setScanQuery(''); setScanResultMessage(''); scanInputRef.current?.focus() }}>Clear</button>
+              </div>
+            </div>
+            <div className="scanner-mode-row">
+              <button className={scanMode === 'smart' ? 'active-tab' : ''} type="button" onClick={() => setScanMode('smart')}>Smart</button>
+              <button className={scanMode === 'workorder' ? 'active-tab' : ''} type="button" onClick={() => setScanMode('workorder')}>Workorders</button>
+              <button className={scanMode === 'machine' ? 'active-tab' : ''} type="button" onClick={() => setScanMode('machine')}>Machines</button>
+              <button className={scanMode === 'part' ? 'active-tab' : ''} type="button" onClick={() => setScanMode('part')}>Parts</button>
+              <button className={scanMode === 'customer' ? 'active-tab' : ''} type="button" onClick={() => setScanMode('customer')}>Customers</button>
+            </div>
+            <form
+              className="scanner-form"
+              onSubmit={(event) => {
+                event.preventDefault()
+                runScanLookup()
+              }}
+            >
+              <label className="scanner-display">
+                Scan or type
+                <input
+                  ref={scanInputRef}
+                  value={scanQuery}
+                  onChange={(e) => {
+                    setScanQuery(e.target.value)
+                    setScanResultMessage('')
+                  }}
+                  placeholder="Scan barcode, workorder number, serial, fleet number, part code, phone, or email"
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  inputMode="search"
+                />
+              </label>
+              <div className="inline-actions">
+                <button type="submit" className="primary-action">Find Match</button>
+                <button type="button" onClick={() => scanInputRef.current?.focus()}>Keep Focused</button>
+              </div>
+            </form>
+            {scanResultMessage && <div className="status-bar">{scanResultMessage}</div>}
+            <div className="scanner-results">
+              {scanResults.map((result) => (
+                <button key={`${result.type}-${result.id}`} type="button" className="scanner-result" onClick={() => applyScanResult(result)}>
+                  <strong>{result.title}</strong>
+                  <small>{result.type.toUpperCase()} | {result.subtitle || 'Ready to open'}</small>
+                </button>
+              ))}
+              {!scanResults.length && (
+                <div className="empty-state">Scan mode is ready. The best match will appear here as soon as you type or scan.</div>
+              )}
+            </div>
+          </div>
+        )}
 
         {activeTab === 'dashboard' && (
           <div className="dashboard-grid">
@@ -2097,6 +2507,7 @@ export default function App() {
               <div className="quick-actions-grid">
                 <button className="quick-action-button" onClick={() => setActiveTab('intake')}>New Intake</button>
                 <button className="quick-action-button" onClick={() => selectedWorkorder ? setActiveTab('diagnose') : setActiveTab('dashboard')}>Resume Job</button>
+                <button className="quick-action-button" onClick={() => setActiveTab('scan')}>Scan Mode</button>
                 <button className="quick-action-button" onClick={() => { setSearchText('waiting parts'); setActiveTab('dashboard') }}>Waiting Parts</button>
                 <button className="quick-action-button" onClick={exportLocalBackup}>Export Package</button>
                 <button className="quick-action-button" onClick={selectedWorkorder ? shareWorkorderCopy : copyStatusUpdate}>
@@ -2672,6 +3083,8 @@ export default function App() {
                   <div className="inline-actions">
                     <button className="primary-action" onClick={saveWorkorder}>Save Workorder</button>
                     <button onClick={shareWorkorderCopy}>Share Customer Copy</button>
+                    <button onClick={shareWorkorderPdf}>Share PDF</button>
+                    <button onClick={downloadWorkorderPdf}>Download PDF</button>
                     <button onClick={() => exportSelectedWorkorder(false)}>Download Customer Copy</button>
                     <button onClick={() => exportSelectedWorkorder(true)}>Open Print / PDF View</button>
                   </div>

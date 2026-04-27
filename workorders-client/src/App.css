@@ -37,6 +37,7 @@
 
 .app-header,
 .work-grid,
+.scan-shell,
 .contact-grid,
 .detail-grid,
 .invoice-grid,
@@ -45,6 +46,9 @@
 .top-actions,
 .dashboard-grid,
 .quick-actions-grid,
+.scanner-header,
+.scanner-panel,
+.scanner-results,
 .photo-card,
 .connection-banner,
 .draft-banner {
@@ -126,6 +130,11 @@
 
 .work-grid {
   grid-template-columns: 340px minmax(0, 1fr);
+  margin-bottom: 16px;
+}
+
+.scan-shell {
+  grid-template-columns: 1fr;
   margin-bottom: 16px;
 }
 
@@ -212,13 +221,53 @@
 }
 
 .quick-actions-grid {
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
 }
 
 .quick-action-button {
   min-height: 64px;
   font-size: 15px;
   font-weight: 800;
+}
+
+.scanner-panel {
+  min-height: 70vh;
+}
+
+.scanner-header {
+  align-items: start;
+  grid-template-columns: 1fr auto;
+}
+
+.scanner-mode-row {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.scanner-form {
+  display: grid;
+  gap: 14px;
+}
+
+.scanner-display input {
+  min-height: 72px;
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.scanner-results {
+  align-content: start;
+}
+
+.scanner-result {
+  min-height: 72px;
+  text-align: left;
+}
+
+.scanner-result strong,
+.scanner-result small {
+  display: block;
 }
 
 .active-tab {
@@ -353,6 +402,7 @@ textarea {
   .app-header,
   .top-actions,
   .work-grid,
+  .scan-shell,
   .contact-grid,
   .detail-grid,
   .invoice-grid,
@@ -375,11 +425,13 @@ textarea {
   .stats-grid,
   .field-grid,
   .quick-actions-grid,
+  .scanner-mode-row,
   .voice-grid,
   .machine-photo-row {
     grid-template-columns: 1fr;
   }
 
+  .scanner-header,
   .connection-banner,
   .draft-banner {
     grid-template-columns: 1fr;
