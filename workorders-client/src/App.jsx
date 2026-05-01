@@ -54,6 +54,12 @@ const emptyWorkorder = {
   laborNotes: '',
   laborHours: 0,
   laborRate: 0,
+  shopSupplies: 0,
+  discountAmount: 0,
+  amountPaid: 0,
+  paymentStatus: 'unpaid',
+  paymentMethod: '',
+  paymentNotes: '',
   laborStartedAt: '',
   laborAccumulatedMs: 0,
   customerSignatureDataUrl: '',
@@ -157,12 +163,27 @@ function normalizeWorkorderForForm(workorder) {
     laborNotes: workorder.laborNotes || '',
     laborHours: Number(workorder.laborHours || 0),
     laborRate: Number(workorder.laborRate || 0),
+    shopSupplies: Number(workorder.shopSupplies || 0),
+    discountAmount: Number(workorder.discountAmount || 0),
+    amountPaid: Number(workorder.amountPaid || 0),
+    paymentStatus: workorder.paymentStatus || 'unpaid',
+    paymentMethod: workorder.paymentMethod || '',
+    paymentNotes: workorder.paymentNotes || '',
     laborStartedAt: workorder.laborStartedAt || '',
     laborAccumulatedMs: Number(workorder.laborAccumulatedMs || 0),
     customerSignatureDataUrl: workorder.customerSignatureDataUrl || '',
     customerSignatureName: workorder.customerSignatureName || '',
     customerSignedAt: workorder.customerSignedAt || ''
   }
+}
+
+function derivePaymentStatus(total, amountPaid, currentStatus = 'unpaid') {
+  const safeTotal = Math.max(0, Number(total) || 0)
+  const safePaid = Math.max(0, Number(amountPaid) || 0)
+  if (safePaid <= 0) return currentStatus === 'paid' && safeTotal > 0 ? 'partial' : 'unpaid'
+  if (safePaid >= safeTotal && safeTotal > 0) return 'paid'
+  if (safePaid > 0 && safePaid < safeTotal) return 'partial'
+  return currentStatus || 'unpaid'
 }
 
 function parseMachineSpeech(text) {
@@ -509,9 +530,13 @@ function buildWorkorderHtml(workorder, customer, machine, partRows, settings, or
   const partsRetail = partRows.reduce((sum, row) => sum + Number(row.qtyUsed || 0) * Number(row.retailPrice || 0), 0)
   const billedLaborHours = Math.max(Number(workorder.laborHours || 0), computeLaborMs(workorder) / 3600000)
   const laborTotal = billedLaborHours * Number(workorder.laborRate || 0)
-  const subtotal = partsRetail + laborTotal
+  const shopSupplies = Number(workorder.shopSupplies || 0)
+  const discountAmount = Number(workorder.discountAmount || 0)
+  const subtotal = Math.max(0, partsRetail + laborTotal + shopSupplies - discountAmount)
   const taxTotal = subtotal * (Number(business.taxRate || 0) / 100)
   const grandTotal = subtotal + taxTotal
+  const amountPaid = Number(workorder.amountPaid || 0)
+  const balanceDue = Math.max(0, grandTotal - amountPaid)
   const partsRows = partRows.length
     ? partRows.map((part) => `
       <tr>
@@ -548,6 +573,13 @@ function buildWorkorderHtml(workorder, customer, machine, partRows, settings, or
   ].filter(([, value]) => value)
 
   const headerContact = [business.phone, business.email].filter(Boolean).join(' | ')
+  const paymentRows = [
+    ['Payment Status', workorder.paymentStatus || 'unpaid'],
+    ['Payment Method', workorder.paymentMethod || ''],
+    ['Amount Paid', amountPaid ? formatCurrency(amountPaid) : ''],
+    ['Balance Due', formatCurrency(balanceDue)],
+    ['Payment Notes', workorder.paymentNotes || '']
+  ].filter(([, value]) => value)
   const timeRows = [
     ['Date received', workorder.receivedAt || workorder.createdAt || ''],
     ['Estimate approved', workorder.approvedAt || ''],
@@ -644,10 +676,14 @@ function buildWorkorderHtml(workorder, customer, machine, partRows, settings, or
   <div class="totals">
     <div><span>Parts</span><strong>${formatCurrency(partsRetail)}</strong></div>
     <div><span>Labor (${htmlEscape(billedLaborHours.toFixed(2))} hrs @ ${formatCurrency(workorder.laborRate)})</span><strong>${formatCurrency(laborTotal)}</strong></div>
+    <div><span>Shop Supplies</span><strong>${formatCurrency(shopSupplies)}</strong></div>
+    <div><span>Discount</span><strong>${formatCurrency(discountAmount)}</strong></div>
     <div><span>Subtotal</span><strong>${formatCurrency(subtotal)}</strong></div>
     <div><span>Tax (${htmlEscape(String(Number(business.taxRate || 0).toFixed(2)))}%)</span><strong>${formatCurrency(taxTotal)}</strong></div>
-    <div class="grand"><span>Total Due</span><strong>${formatCurrency(grandTotal)}</strong></div>
+    <div><span>Amount Paid</span><strong>${formatCurrency(amountPaid)}</strong></div>
+    <div class="grand"><span>Balance Due</span><strong>${formatCurrency(balanceDue)}</strong></div>
   </div>
+  ${paymentRows.length ? `<h2>Payment</h2><div class="box"><table><tbody>${paymentRows.map(([label, value]) => `<tr><th>${htmlEscape(label)}</th><td>${htmlEscape(value)}</td></tr>`).join('')}</tbody></table></div>` : ''}
   ${business.invoiceFooter ? `<p class="muted">${htmlEscape(business.invoiceFooter)}</p>` : ''}
   <div class="signatures">
     ${signatureBlock}
@@ -662,9 +698,13 @@ function buildWorkorderPdfBlob(workorder, customer, machine, partRows, settings,
   const partsRetail = partRows.reduce((sum, row) => sum + Number(row.qtyUsed || 0) * Number(row.retailPrice || 0), 0)
   const billedLaborHours = Math.max(Number(workorder.laborHours || 0), computeLaborMs(workorder) / 3600000)
   const laborTotal = billedLaborHours * Number(workorder.laborRate || 0)
-  const subtotal = partsRetail + laborTotal
+  const shopSupplies = Number(workorder.shopSupplies || 0)
+  const discountAmount = Number(workorder.discountAmount || 0)
+  const subtotal = Math.max(0, partsRetail + laborTotal + shopSupplies - discountAmount)
   const taxTotal = subtotal * (Number(business.taxRate || 0) / 100)
   const grandTotal = subtotal + taxTotal
+  const amountPaid = Number(workorder.amountPaid || 0)
+  const balanceDue = Math.max(0, grandTotal - amountPaid)
   const lines = [
     business.shopName || 'Service Work Order',
     'Customer Copy',
@@ -725,9 +765,17 @@ function buildWorkorderPdfBlob(workorder, customer, machine, partRows, settings,
     'Charges Summary',
     `Parts: ${formatCurrency(partsRetail)}`,
     `Labor (${billedLaborHours.toFixed(2)} hrs @ ${formatCurrency(workorder.laborRate)}): ${formatCurrency(laborTotal)}`,
+    `Shop Supplies: ${formatCurrency(shopSupplies)}`,
+    `Discount: ${formatCurrency(discountAmount)}`,
     `Subtotal: ${formatCurrency(subtotal)}`,
     `Tax (${Number(business.taxRate || 0).toFixed(2)}%): ${formatCurrency(taxTotal)}`,
-    `Total Due: ${formatCurrency(grandTotal)}`,
+    `Amount Paid: ${formatCurrency(amountPaid)}`,
+    `Balance Due: ${formatCurrency(balanceDue)}`,
+    '',
+    'Payment',
+    `Payment status: ${workorder.paymentStatus || 'unpaid'}`,
+    workorder.paymentMethod ? `Payment method: ${workorder.paymentMethod}` : '',
+    workorder.paymentNotes ? `Payment notes: ${workorder.paymentNotes}` : '',
     '',
     'Timeline'
   )
@@ -1179,10 +1227,16 @@ export default function App() {
     const timerHours = activeTimerMs / 3600000
     const laborHours = Math.max(Number(workorderForm.laborHours || 0), timerHours)
     const labor = laborHours * Number(workorderForm.laborRate || 0)
-    const subtotal = partsRetail + labor
+    const shopSupplies = Number(workorderForm.shopSupplies || 0)
+    const discountAmount = Number(workorderForm.discountAmount || 0)
+    const subtotal = Math.max(0, partsRetail + labor + shopSupplies - discountAmount)
     const tax = subtotal * (Number(businessSettings.taxRate || 0) / 100)
-    return { partsRetail, laborHours, labor, subtotal, tax, total: subtotal + tax }
-  }, [activeTimerMs, businessSettings.taxRate, workorderForm.laborHours, workorderForm.laborRate, workorderParts])
+    const total = subtotal + tax
+    const amountPaid = Number(workorderForm.amountPaid || 0)
+    const balanceDue = Math.max(0, total - amountPaid)
+    const paymentStatus = derivePaymentStatus(total, amountPaid, workorderForm.paymentStatus)
+    return { partsRetail, laborHours, labor, shopSupplies, discountAmount, subtotal, tax, total, amountPaid, balanceDue, paymentStatus }
+  }, [activeTimerMs, businessSettings.taxRate, workorderForm.amountPaid, workorderForm.discountAmount, workorderForm.laborHours, workorderForm.laborRate, workorderForm.paymentStatus, workorderForm.shopSupplies, workorderParts])
 
   useEffect(() => {
     if (!workorderForm.laborStartedAt) return undefined
@@ -1775,7 +1829,8 @@ export default function App() {
     const preparedForm = withLifecycleTimestamps(
       {
         ...workorderForm,
-        laborRate: Number(workorderForm.laborRate) || Number(businessSettings.laborRateDefault) || 0
+        laborRate: Number(workorderForm.laborRate) || Number(businessSettings.laborRateDefault) || 0,
+        paymentStatus: derivePaymentStatus(invoiceTotals.total, workorderForm.amountPaid, workorderForm.paymentStatus)
       },
       ''
     )
@@ -1792,6 +1847,9 @@ export default function App() {
           equipmentId: preparedForm.equipmentId ? Number(preparedForm.equipmentId) : null,
           laborHours: Number(preparedForm.laborHours) || 0,
           laborRate: Number(preparedForm.laborRate) || Number(businessSettings.laborRateDefault) || 0,
+          shopSupplies: Number(preparedForm.shopSupplies) || 0,
+          discountAmount: Number(preparedForm.discountAmount) || 0,
+          amountPaid: Number(preparedForm.amountPaid) || 0,
           approvalLimit: Number(preparedForm.approvalLimit) || 0,
           laborAccumulatedMs: Number(preparedForm.laborAccumulatedMs) || 0,
           createdAt: nowIso(),
@@ -1817,6 +1875,9 @@ export default function App() {
         equipmentId: preparedForm.equipmentId ? Number(preparedForm.equipmentId) : null,
         laborHours: Number(preparedForm.laborHours) || 0,
         laborRate: Number(preparedForm.laborRate) || Number(businessSettings.laborRateDefault) || 0,
+        shopSupplies: Number(preparedForm.shopSupplies) || 0,
+        discountAmount: Number(preparedForm.discountAmount) || 0,
+        amountPaid: Number(preparedForm.amountPaid) || 0,
         approvalLimit: Number(preparedForm.approvalLimit) || 0
       })
     })
@@ -1837,7 +1898,10 @@ export default function App() {
       setStatus('Select a workorder first.')
       return
     }
-    const preparedForm = withLifecycleTimestamps(workorderForm, selectedWorkorder.status || '')
+    const preparedForm = withLifecycleTimestamps({
+      ...workorderForm,
+      paymentStatus: derivePaymentStatus(invoiceTotals.total, workorderForm.amountPaid, workorderForm.paymentStatus)
+    }, selectedWorkorder.status || '')
 
     if (activeMode === 'local') {
       withLocalDb((db) => {
@@ -1849,6 +1913,9 @@ export default function App() {
           equipmentId: preparedForm.equipmentId ? Number(preparedForm.equipmentId) : null,
           laborHours: Number(preparedForm.laborHours) || 0,
           laborRate: Number(preparedForm.laborRate) || Number(businessSettings.laborRateDefault) || 0,
+          shopSupplies: Number(preparedForm.shopSupplies) || 0,
+          discountAmount: Number(preparedForm.discountAmount) || 0,
+          amountPaid: Number(preparedForm.amountPaid) || 0,
           approvalLimit: Number(preparedForm.approvalLimit) || 0,
           laborAccumulatedMs: Number(preparedForm.laborAccumulatedMs) || 0,
           updatedAt: nowIso()
@@ -1871,6 +1938,9 @@ export default function App() {
         equipmentId: preparedForm.equipmentId ? Number(preparedForm.equipmentId) : null,
         laborHours: Number(preparedForm.laborHours) || 0,
         laborRate: Number(preparedForm.laborRate) || Number(businessSettings.laborRateDefault) || 0,
+        shopSupplies: Number(preparedForm.shopSupplies) || 0,
+        discountAmount: Number(preparedForm.discountAmount) || 0,
+        amountPaid: Number(preparedForm.amountPaid) || 0,
         approvalLimit: Number(preparedForm.approvalLimit) || 0,
         laborAccumulatedMs: Number(preparedForm.laborAccumulatedMs) || 0
       })
@@ -2198,6 +2268,36 @@ export default function App() {
       approvalMethod: current.approvalMethod || 'in person'
     }))
     setStatus('Quote marked approved. Save workorder to keep it.')
+    vibrate([20, 30, 20])
+  }
+
+  function markInvoicedNow() {
+    setWorkorderForm((current) => withLifecycleTimestamps({
+      ...current,
+      status: current.status === 'picked up' ? 'picked up' : 'invoiced'
+    }, current.status || ''))
+    setStatus('Workorder marked invoiced. Save workorder to keep it.')
+    vibrate([20, 30, 20])
+  }
+
+  function markPickedUpNow() {
+    setWorkorderForm((current) => withLifecycleTimestamps({
+      ...current,
+      status: 'picked up'
+    }, current.status || ''))
+    setStatus('Workorder marked picked up. Save workorder to keep it.')
+    vibrate([20, 30, 20])
+  }
+
+  function markPaidInFull() {
+    setWorkorderForm((current) => ({
+      ...current,
+      amountPaid: invoiceTotals.total.toFixed(2),
+      paymentStatus: 'paid',
+      paymentMethod: current.paymentMethod || 'card',
+      invoicedAt: current.invoicedAt || nowIso()
+    }))
+    setStatus('Invoice marked paid in full. Save workorder to keep it.')
     vibrate([20, 30, 20])
   }
 
@@ -3044,18 +3144,62 @@ export default function App() {
                   <div className="summary-list">
                     <div><span>Parts</span><strong>{formatCurrency(invoiceTotals.partsRetail)}</strong></div>
                     <div><span>Labor ({invoiceTotals.laborHours.toFixed(2)} hrs)</span><strong>{formatCurrency(invoiceTotals.labor)}</strong></div>
+                    <div><span>Shop Supplies</span><strong>{formatCurrency(invoiceTotals.shopSupplies)}</strong></div>
+                    <div><span>Discount</span><strong>{formatCurrency(invoiceTotals.discountAmount)}</strong></div>
                     <div><span>Subtotal</span><strong>{formatCurrency(invoiceTotals.subtotal)}</strong></div>
                     <div><span>Tax ({Number(businessSettings.taxRate || 0).toFixed(2)}%)</span><strong>{formatCurrency(invoiceTotals.tax)}</strong></div>
                   </div>
                   <div className="invoice-total">
-                    <span>Total</span>
-                    <strong>{formatCurrency(invoiceTotals.total)}</strong>
+                    <span>Balance Due</span>
+                    <strong>{formatCurrency(invoiceTotals.balanceDue)}</strong>
+                  </div>
+                  <div className="summary-list">
+                    <div><span>Total Invoice</span><strong>{formatCurrency(invoiceTotals.total)}</strong></div>
+                    <div><span>Amount Paid</span><strong>{formatCurrency(invoiceTotals.amountPaid)}</strong></div>
+                    <div><span>Payment Status</span><strong>{invoiceTotals.paymentStatus}</strong></div>
                   </div>
                   <div className="summary-list">
                     <div><span>Approved By</span><strong>{workorderForm.approvedBy || 'Not recorded'}</strong></div>
                     <div><span>Method</span><strong>{workorderForm.approvalMethod || 'Not recorded'}</strong></div>
                     <div><span>Approved At</span><strong>{workorderForm.approvedAt || 'Not recorded'}</strong></div>
                     <div><span>Limit</span><strong>{workorderForm.approvalLimit ? formatCurrency(workorderForm.approvalLimit) : 'Not set'}</strong></div>
+                  </div>
+                  <div className="field-grid">
+                    <label>
+                      Shop Supplies
+                      <input type="number" min="0" step="0.01" value={workorderForm.shopSupplies} onChange={(e) => updateForm(setWorkorderForm, 'shopSupplies', e.target.value)} />
+                    </label>
+                    <label>
+                      Discount
+                      <input type="number" min="0" step="0.01" value={workorderForm.discountAmount} onChange={(e) => updateForm(setWorkorderForm, 'discountAmount', e.target.value)} />
+                    </label>
+                    <label>
+                      Amount Paid
+                      <input type="number" min="0" step="0.01" value={workorderForm.amountPaid} onChange={(e) => updateForm(setWorkorderForm, 'amountPaid', e.target.value)} />
+                    </label>
+                    <label>
+                      Payment Status
+                      <select value={workorderForm.paymentStatus} onChange={(e) => updateForm(setWorkorderForm, 'paymentStatus', e.target.value)}>
+                        <option value="unpaid">Unpaid</option>
+                        <option value="partial">Partial</option>
+                        <option value="paid">Paid</option>
+                      </select>
+                    </label>
+                    <label>
+                      Payment Method
+                      <select value={workorderForm.paymentMethod} onChange={(e) => updateForm(setWorkorderForm, 'paymentMethod', e.target.value)}>
+                        <option value="">Choose</option>
+                        <option value="cash">Cash</option>
+                        <option value="card">Card</option>
+                        <option value="e-transfer">E-Transfer</option>
+                        <option value="cheque">Cheque</option>
+                        <option value="other">Other</option>
+                      </select>
+                    </label>
+                    <label className="full-span">
+                      Payment Notes
+                      <textarea value={workorderForm.paymentNotes} onChange={(e) => updateForm(setWorkorderForm, 'paymentNotes', e.target.value)} />
+                    </label>
                   </div>
                   <div className="signature-block">
                     <label>
@@ -3081,6 +3225,9 @@ export default function App() {
                     )}
                   </div>
                   <div className="inline-actions">
+                    <button type="button" onClick={markInvoicedNow}>Mark Invoiced</button>
+                    <button type="button" onClick={markPickedUpNow}>Mark Picked Up</button>
+                    <button type="button" onClick={markPaidInFull}>Mark Paid In Full</button>
                     <button className="primary-action" onClick={saveWorkorder}>Save Workorder</button>
                     <button onClick={shareWorkorderCopy}>Share Customer Copy</button>
                     <button onClick={shareWorkorderPdf}>Share PDF</button>
